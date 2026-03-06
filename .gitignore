@@ -1,0 +1,22 @@
+# Python 缓存
+__pycache__/
+*.py[cod]
+
+# 环境变量与机密
+.env
+
+# 虚拟环境（如果你后期使用了venv）
+venv/
+env/
+
+# 原文素材与大文件（根据实际情况决定是否追踪小说原文）
+reference_novels/
+
+# 自动生成的统计数据和中间产物（建议不追踪，只追踪生成它们的脚本代码）
+text_statistics/
+text_features/
+novel_projects/
+
+# Trae/IDE 配置文件
+.vscode/
+.trae/
