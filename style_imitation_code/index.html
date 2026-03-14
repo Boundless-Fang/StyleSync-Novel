@@ -1,0 +1,783 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DeepSeek Ultimate Pro + Writer</title>
+    <!-- 替换为国内稳定的 Staticfile CDN -->
+    <link href="https://cdn.staticfile.org/tailwindcss/2.2.19/tailwind.min.css" rel="stylesheet">
+    <script src="https://cdn.staticfile.org/vue/3.3.4/vue.global.min.js"></script>
+    <script src="https://cdn.staticfile.org/marked/5.1.0/marked.min.js"></script>
+    <link href="https://lf26-cdn-tos.bytecdntp.com/cdn/expire-1-M/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; transition: font-size 0.3s; }
+        .markdown-body p { margin-bottom: 0.75em; }
+        .markdown-body pre { background: #1e293b; color: #f8fafc; padding: 1em; border-radius: 0.5rem; overflow-x: auto; margin-bottom: 1em;}
+        .markdown-body code { font-family: monospace; background: #e2e8f0; padding: 0.2em 0.4em; border-radius: 0.25rem; font-size: 0.9em; color: #ef4444;}
+        .markdown-body pre code { background: transparent; color: inherit; padding: 0; }
+        .forbidden-highlight { background-color: #ffe6e6; color: #d8000c; font-weight: bold; padding: 2px 4px; border-radius: 4px; }
+        .chat-container { scroll-behavior: smooth; }
+    </style>
+</head>
+<body class="bg-gray-100 h-screen overflow-hidden text-gray-800" id="app">
+
+<div class="flex h-full w-full" :style="{ fontSize: config.fontSize + 'px' }">
+    
+    <div class="w-72 bg-white border-r border-gray-200 flex flex-col shadow-lg z-10 flex-shrink-0">
+        <div class="p-4 border-b border-gray-100 bg-gray-50 flex items-center gap-2">
+            <i class="fa-solid fa-microchip text-blue-600 text-xl"></i>
+            <h1 class="font-bold text-lg text-gray-800">全局控制台</h1>
+        </div>
+
+        <div class="flex-1 overflow-y-auto p-4 space-y-6">
+            <div>
+                <h3 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">📺 布局与显示</h3>
+                <label class="flex items-center space-x-2 cursor-pointer mb-3">
+                    <input type="checkbox" v-model="config.showWorkspace" class="rounded text-blue-600 focus:ring-blue-500">
+                    <span class="text-sm font-medium">开启小说工作台</span>
+                </label>
+                <div v-if="config.showWorkspace" class="mb-3">
+                    <label class="text-xs text-gray-500 block mb-1">中右区域比例 ({{ config.layoutRatio }}%)</label>
+                    <input type="range" v-model="config.layoutRatio" min="20" max="80" class="w-full h-1 bg-gray-200 rounded-lg appearance-none cursor-pointer">
+                </div>
+                <div>
+                    <label class="text-xs text-gray-500 block mb-1">全局字号 ({{ config.fontSize }}px)</label>
+                    <input type="range" v-model="config.fontSize" min="12" max="32" class="w-full h-1 bg-gray-200 rounded-lg appearance-none cursor-pointer">
+                </div>
+            </div>
+
+            <!-- 任务监控面板 -->
+            <div class="border-t border-gray-100 pt-4">
+                <h3 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">📋 任务队列</h3>
+                <div v-if="taskList.length === 0" class="text-xs text-gray-400 text-center py-2">暂无任务记录</div>
+                <div class="space-y-2">
+                    <div v-for="task in visibleTasks" :key="task.id" 
+                        :class="['text-xs p-2 rounded border shadow-sm transition-colors', 
+                            task.status === 'success' ? 'bg-green-50 border-green-200' : 
+                            (['failed', 'error'].includes(task.status) ? 'bg-red-50 border-red-200' : 'bg-white border-gray-200')
+                        ]">
+                        <div class="flex justify-between items-center mb-1">
+                            <span class="font-bold truncate w-1/2" :title="task.name">{{ task.name }}</span>
+                            <span :class="{
+                                'text-blue-600 font-bold': task.status === 'running' || task.status === 'pending',
+                                'text-green-600 font-bold': task.status === 'success',
+                                'text-red-600 font-bold': ['failed', 'error'].includes(task.status)
+                            }">
+                                <span v-if="task.status === 'running' || task.status === 'pending'">
+                                    <i class="fas fa-spinner fa-spin"></i> 执行中
+                                </span>
+                                <span v-else-if="task.status === 'success'">
+                                    <i class="fas fa-check"></i> 已完成
+                                </span>
+                                <span v-else>
+                                    <i class="fas fa-times"></i> 失败
+                                </span>
+                            </span>
+                        </div>
+                        <div class="flex justify-between text-gray-400 scale-90 origin-left mb-1">
+                            <span>{{ task.type }}</span>
+                            <span v-if="task.end_time">{{ new Date(task.end_time).toLocaleTimeString() }}</span>
+                            <span v-else>启动于 {{ new Date(task.created_at || Date.now()).toLocaleTimeString() }}</span>
+                        </div>
+                        
+                        <!-- 显示参考文件上下文 -->
+                        <div v-if="task.ref_file" class="text-xs text-gray-500 border-t border-gray-100 pt-1 mt-1 truncate" :title="task.ref_file">
+                            <i class="fa-solid fa-book-open text-gray-400 mr-1"></i>{{ task.ref_file }}
+                        </div>
+
+                        <div v-if="['failed', 'error'].includes(task.status)" class="mt-1 text-red-500 break-words bg-white bg-opacity-50 p-1 rounded border border-red-100 text-xs font-mono max-h-32 overflow-y-auto whitespace-pre-wrap">
+                            {{ task.error || (task.stderr ? task.stderr : '未知错误') }}
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- 展开/收起按钮 -->
+                <button v-if="taskList.length > 5" @click="showAllTasks = !showAllTasks" class="w-full text-xs text-blue-500 py-2 hover:bg-blue-50 rounded mt-2 transition-colors flex items-center justify-center gap-1">
+                    <span>{{ showAllTasks ? '收起列表' : `展开全部 (${taskList.length})` }}</span>
+                    <i :class="showAllTasks ? 'fa-solid fa-chevron-up' : 'fa-solid fa-chevron-down'"></i>
+                </button>
+            </div>
+            <hr class="border-gray-100">
+
+            <div>
+                <h3 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">🌍 API与防护</h3>
+                <input type="password" v-model="config.apiKey" placeholder="DeepSeek API Key" class="w-full text-sm p-2 border border-gray-300 rounded focus:ring-2 focus:ring-blue-500 outline-none mb-2">
+                <textarea v-model="config.globalForbidden" placeholder="全局禁用词 (逗号分隔)" class="w-full text-sm p-2 border border-gray-300 rounded focus:ring-2 focus:ring-blue-500 h-16 outline-none mb-2"></textarea>
+                
+                <div class="flex items-center justify-between mb-2">
+                    <label class="text-xs text-gray-500">自动重试次数</label>
+                    <input type="number" v-model.number="config.retryLimit" min="1" max="5" class="w-16 text-sm p-1 border border-gray-300 rounded text-center outline-none">
+                </div>
+                <div>
+                    <label class="text-xs text-gray-500 block mb-1">敏感词容忍度 ({{ config.forbiddenTolerance }}%)</label>
+                    <input type="range" v-model="config.forbiddenTolerance" min="1" max="100" class="w-full h-1 bg-red-200 rounded-lg appearance-none cursor-pointer">
+                </div>
+            </div>
+            <hr class="border-gray-100">
+
+            <div>
+                <div class="flex justify-between items-center mb-3">
+                    <h3 class="text-xs font-semibold text-gray-400 uppercase tracking-wider">🗂️ 历史对话</h3>
+                    <div class="space-x-1">
+                        <button @click="createNewChat" class="text-gray-500 hover:text-blue-600" title="新建独立对话"><i class="fa-solid fa-plus"></i></button>
+                        <button @click="copyCurrentChat" class="text-gray-500 hover:text-green-600" title="克隆当前对话及上下文"><i class="fa-solid fa-copy"></i></button>
+                    </div>
+                </div>
+                <div class="space-y-1 max-h-32 overflow-y-auto">
+                    <div v-for="chat in chats" :key="chat.id" 
+                         @click="currentChatId = chat.id"
+                         :class="['p-2 text-sm rounded cursor-pointer truncate transition-colors', currentChatId === chat.id ? 'bg-blue-100 text-blue-700 font-medium' : 'hover:bg-gray-100 text-gray-600']">
+                        {{ chat.title }}
+                    </div>
+                </div>
+            </div>
+            <hr class="border-gray-100">
+
+            <div v-if="currentChat">
+                <h3 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">⚙️ 当前对话参数</h3>
+                <input type="text" v-model="currentChat.title" placeholder="对话标题" class="w-full text-sm p-2 border border-gray-300 rounded mb-2">
+                <select v-model="currentChat.model" class="w-full text-sm p-2 border border-gray-300 rounded mb-2 bg-white outline-none">
+                    <option value="deepseek-chat">DeepSeek-V3 (标准模型)</option>
+                    <option value="deepseek-reasoner">DeepSeek-R1 (推理模型)</option>
+                </select>
+                <textarea v-model="currentChat.localForbidden" placeholder="局部禁用词 (仅当前对话生效)" class="w-full text-sm p-2 border border-gray-300 rounded h-12 mb-2 bg-red-50 outline-none placeholder-red-300 border-red-200"></textarea>
+
+                <div class="bg-gray-50 p-2 rounded border border-gray-200 mb-2">
+                    <label class="text-xs text-gray-600 block mb-1">Temperature: <span class="text-blue-600 font-bold">{{ currentChat.temperature }}</span></label>
+                    <input type="range" v-model.number="currentChat.temperature" min="0" max="2" step="0.1" class="w-full h-1 bg-blue-200 rounded-lg appearance-none cursor-pointer mb-3">
+                    
+                    <label class="text-xs text-gray-600 block mb-1">Top P: <span class="text-blue-600 font-bold">{{ currentChat.top_p }}</span></label>
+                    <input type="range" v-model.number="currentChat.top_p" min="0" max="1" step="0.05" class="w-full h-1 bg-blue-200 rounded-lg appearance-none cursor-pointer mb-3">
+                </div>
+
+                <textarea v-model="currentChat.systemPrompt" placeholder="🤖 System Prompt (系统提示词)" class="w-full text-sm p-2 border border-gray-300 rounded h-20 mb-2 outline-none"></textarea>
+                
+                <button @click="clearCurrentChatMessages" class="w-full py-2 bg-red-50 hover:bg-red-100 text-red-600 rounded text-sm font-medium transition-colors">
+                    <i class="fa-solid fa-trash-can mr-1"></i> 清空当前上下文记录
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div class="flex flex-col h-full bg-white transition-all duration-300 z-20" 
+         :style="{ width: config.showWorkspace ? config.layoutRatio + '%' : '100%', boxShadow: '0 0 15px rgba(0,0,0,0.05)' }">
+        <div class="p-4 border-b border-gray-200 bg-white flex justify-between items-center shadow-sm">
+            <h2 class="font-bold text-gray-800"><i class="fa-regular fa-comments text-blue-500 mr-2"></i>{{ currentChat?.title || '未选择对话' }}</h2>
+            <div class="flex gap-2">
+                <span class="text-xs text-red-400 bg-red-50 px-2 py-1 rounded-full border border-red-100">拦截次数: {{ currentChat?.stats?.local_hit_count || 0 }}</span>
+                <span class="text-xs text-gray-500 bg-gray-100 px-2 py-1 rounded-full border border-gray-200">{{ currentChat?.model }}</span>
+            </div>
+        </div>
+
+        <div class="flex-1 overflow-y-auto p-6 chat-container space-y-6" id="chatContainer">
+            <div v-if="!currentChat?.messages.length" class="h-full flex flex-col items-center justify-center text-gray-400 space-y-4">
+                <i class="fa-regular fa-paper-plane text-4xl mb-2 opacity-50"></i>
+                <p>输入指令，执行交互式对话或文本生成...</p>
+            </div>
+
+            <div v-for="(msg, index) in currentChat?.messages" :key="index" class="flex flex-col">
+                <div v-if="msg.role === 'user'" class="self-end bg-blue-600 text-white p-4 rounded-2xl rounded-tr-sm shadow-md" style="max-width: 85%">
+                    <div class="leading-relaxed whitespace-pre-wrap" style="font-size: 0.95em">{{ msg.content }}</div>
+                </div>
+                
+                <div v-else class="self-start w-full bg-gray-50 border border-gray-200 p-5 rounded-2xl rounded-tl-sm shadow-sm group" style="max-width: 95%">
+                    <div class="markdown-body leading-relaxed text-gray-700" style="font-size: 0.95em"
+                         v-html="renderMarkdown(msg.versions[msg.active_version].content)">
+                    </div>
+                    
+                    <div class="mt-4 flex items-center justify-between text-xs text-gray-500">
+                        <div v-if="msg.versions.length > 1" class="flex items-center gap-2 bg-white px-2 py-1 rounded border border-gray-200">
+                            <button @click="msg.active_version = Math.max(0, msg.active_version - 1)" class="hover:text-blue-600"><i class="fa-solid fa-chevron-left"></i></button>
+                            <span>版本 {{ msg.active_version + 1 }} / {{ msg.versions.length }}</span>
+                            <button @click="msg.active_version = Math.min(msg.versions.length - 1, msg.active_version + 1)" class="hover:text-blue-600"><i class="fa-solid fa-chevron-right"></i></button>
+                        </div>
+                        <div v-else></div>
+
+                        <div class="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-3">
+                            <span>字数: {{ msg.versions[msg.active_version].content.length }}</span>
+                            <button v-if="config.showWorkspace && projects.length" @click="importToNovel(msg.versions[msg.active_version].content)" class="hover:text-blue-600 transition-colors flex items-center gap-1 bg-white px-2 py-1 rounded shadow-sm border border-gray-200">
+                                <i class="fa-solid fa-file-import"></i> 导入小说末尾
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div v-if="isGenerating" class="self-start text-gray-400 text-sm animate-pulse flex items-center gap-2">
+                <i class="fa-solid fa-circle-notch fa-spin"></i> 模型流式生成中...
+            </div>
+        </div>
+
+        <div class="p-4 bg-gray-50 border-t border-gray-200">
+            <div class="relative flex items-center bg-white rounded-xl border border-gray-300 shadow-sm focus-within:ring-2 focus-within:ring-blue-500 focus-within:border-transparent overflow-hidden">
+                <textarea v-model="chatInput" @keydown.enter.prevent="sendMessage" :disabled="isGenerating" placeholder="输入指令 (Enter 发送)" rows="1" class="w-full py-3 pl-4 pr-12 outline-none resize-none max-h-32 bg-transparent"></textarea>
+                
+                <button v-if="isGenerating" @click="stopGeneration" class="absolute right-2 p-2 text-red-500 hover:bg-red-50 rounded-lg transition-colors title='强制中断请求'">
+                    <i class="fa-solid fa-stop text-lg"></i>
+                </button>
+                <button v-else @click="sendMessage" :disabled="!chatInput.trim()" class="absolute right-2 p-2 text-blue-600 disabled:text-gray-300 hover:bg-blue-50 rounded-lg transition-colors">
+                    <i class="fa-solid fa-paper-plane text-lg"></i>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div v-if="config.showWorkspace" class="bg-gray-50 flex flex-col transition-all duration-300 border-l border-gray-200" :style="{ width: (100 - config.layoutRatio) + '%' }">
+        <div class="flex border-b border-gray-200 bg-white">
+            <button @click="activeTab = 'editor'" :class="['flex-1 py-3 text-sm font-medium border-b-2 transition-colors', activeTab === 'editor' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-50']">
+                <i class="fa-solid fa-pen-nib mr-1"></i> 内容编辑
+            </button>
+            <button @click="activeTab = 'workflow'" :class="['flex-1 py-3 text-sm font-medium border-b-2 transition-colors', activeTab === 'workflow' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-50']">
+                <i class="fa-solid fa-gears mr-1"></i> 自动化工作流
+            </button>
+            <button @click="activeTab = 'knowledge'" :class="['flex-1 py-3 text-sm font-medium border-b-2 transition-colors', activeTab === 'knowledge' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-50']">
+                <i class="fa-solid fa-database mr-1"></i> 知识库管理
+            </button>
+        </div>
+
+        <div v-if="activeTab === 'editor'" class="flex-1 flex flex-col p-4 overflow-hidden">
+            <div v-if="projects.length === 0" class="h-full flex flex-col items-center justify-center text-gray-400">
+                <i class="fa-solid fa-folder-open text-4xl mb-3 opacity-50"></i>
+                <p class="text-sm">尚未定位到项目，请在【自动化工作流】中生成或加载</p>
+            </div>
+            <template v-else>
+                <div class="bg-white p-3 rounded-lg shadow-sm border border-gray-200 mb-3 space-y-3 shrink-0">
+                    <div class="flex items-center gap-2">
+                        <i class="fa-solid fa-book text-gray-400"></i>
+                        <select v-model="currentProject" @change="fetchChapters" class="flex-1 text-sm bg-gray-50 border border-gray-200 rounded p-1.5 outline-none focus:ring-1 focus:ring-blue-500">
+                            <option v-for="p in projects" :value="p">{{ p }}</option>
+                        </select>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <i class="fa-regular fa-file-lines text-gray-400"></i>
+                        <select v-model="currentChapter" @change="fetchContent" class="flex-1 text-sm bg-gray-50 border border-gray-200 rounded p-1.5 outline-none focus:ring-1 focus:ring-blue-500">
+                            <option v-for="c in chapters" :value="c">{{ c.replace('.txt', '') }}</option>
+                        </select>
+                        <div class="flex gap-1 border-l pl-2 border-gray-200">
+                            <button @click="renameChapter" class="p-1.5 text-gray-400 hover:text-blue-600 rounded hover:bg-gray-100" title="重命名当前章节"><i class="fa-solid fa-pencil"></i></button>
+                            <button @click="addChapter" class="p-1.5 text-gray-400 hover:text-green-600 rounded hover:bg-gray-100" title="新建章节"><i class="fa-solid fa-plus"></i></button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flex-1 bg-white rounded-lg shadow-sm border border-gray-200 flex flex-col overflow-hidden relative">
+                    <div class="px-4 py-2 bg-gray-50 border-b border-gray-200 text-xs text-gray-400 flex justify-between items-center">
+                        <span>文本编辑器</span>
+                        <span :class="saveStatus === '已保存' ? 'text-green-500' : 'text-orange-400'">{{ saveStatus }} (字数统计: {{ editorContent.length }})</span>
+                    </div>
+                    <textarea v-model="editorContent" @input="debouncedSave" class="flex-1 w-full p-4 resize-none outline-none leading-relaxed text-gray-700 bg-transparent" style="font-size: 1.05em"></textarea>
+                </div>
+            </template>
+        </div>
+
+        <div v-if="activeTab === 'workflow'" class="flex-1 overflow-y-auto p-4 space-y-4">
+            <div class="bg-white p-5 rounded-lg shadow-sm border border-gray-200">
+                <h3 class="text-sm font-bold text-gray-800 mb-4 flex items-center gap-2"><i class="fa-solid fa-rocket text-orange-500"></i> 工程初始化</h3>
+                <input type="text" v-model="newProjectName" placeholder="输入小说书名..." class="w-full text-sm border border-gray-300 rounded p-2 mb-4 focus:ring-2 focus:ring-orange-500 outline-none">
+                <button @click="createProject" :disabled="!newProjectName.trim()" class="w-full py-2 bg-orange-500 hover:bg-orange-600 disabled:opacity-50 text-white text-sm font-bold rounded shadow-sm transition-colors">
+                    一键生成工程结构
+                </button>
+            </div>
+
+            <div class="bg-white p-5 rounded-lg shadow-sm border border-gray-200">
+                <h3 class="text-sm font-bold text-gray-800 mb-4 flex items-center gap-2"><i class="fa-solid fa-microchip text-blue-500"></i> 脚本执行单元</h3>
+                <label class="text-xs text-gray-500 block mb-1">目标原著文件 (reference_novels)</label>
+                <select v-model="selectedReference" class="w-full text-sm border border-gray-300 rounded p-2 mb-3 bg-gray-50">
+                    <option value="">-- 需选中参考源文件 --</option>
+                    <option v-for="ref in references" :value="ref">{{ ref }}</option>
+                </select>
+
+                <label class="text-xs text-gray-500 block mb-1">执行脚本类型</label>
+                <select v-model="workflowScriptType" class="w-full text-sm border border-gray-300 rounded p-2 mb-3 bg-gray-50">
+                    <option value="f1a">f1a - 本地物理指标与TTR统计</option>
+                    <option value="f1b">f1b - 大模型深层文风提取</option>
+                    <option value="f2a">f2a - 本地高频词提取</option>
+                    <option value="f2b">f2b - 大模型词汇清洗分类</option>
+                    <option value="f3a">f3a - 专属词库提取</option>
+                    <option value="f3b">f3b - 世界观整理</option>
+                    <option value="f3c">f3c - 角色卡提取</option>
+                    <option value="f4">f4 - 剧情动态压缩建库</option>
+                    <option value="f6">f6 - 剧情方向推演</option>
+                    <option value="f7">f7 - 文本多维度校验</option>
+                </select>
+
+                <div v-if="['f1b', 'f2b', 'f3a', 'f3b', 'f3c', 'f4a', 'f5a', 'f5b', 'f6', 'f7'].includes(workflowScriptType)" class="mb-3">
+                    <label class="text-xs text-gray-500 block mb-1">选择推理模型</label>
+                    <select v-model="workflowModel" class="w-full text-sm border border-gray-300 rounded p-2 bg-gray-50">
+                        <option value="deepseek-chat">DeepSeek-V3 (标准模型)</option>
+                        <option value="deepseek-reasoner">DeepSeek-R1 (深度推理)</option>
+                    </select>
+                </div>
+
+                <div v-if="workflowScriptType === 'f3c'" class="mb-3">
+                    <label class="text-xs text-gray-500 block mb-1">指定目标角色名 (从现有选择或新建)</label>
+                    <div class="flex gap-2">
+                        <select v-model="workflowCharSelect" @change="workflowCharName = workflowCharSelect" class="w-1/3 text-sm border border-gray-300 rounded p-2 bg-gray-50">
+                            <option value="">-- 选择现有角色 --</option>
+                            <option v-for="char in projectCharacters" :value="char">{{ char }}</option>
+                        </select>
+                        <input type="text" v-model="workflowCharName" placeholder="例如：张小凡" class="flex-1 text-sm border border-gray-300 rounded p-2 focus:ring-1 focus:ring-blue-500 outline-none">
+                    </div>
+                </div>
+
+                <div v-if="['f5a', 'f5b', 'f7'].includes(workflowScriptType)" class="mb-3">
+                    <label class="text-xs text-gray-500 block mb-1">目标章节名</label>
+                    <div class="flex gap-2">
+                        <select v-model="workflowChapterSelect" @change="workflowChapterName = workflowChapterSelect" class="w-1/3 text-sm border border-gray-300 rounded p-2 bg-gray-50">
+                            <option value="">-- 选择现有章节 --</option>
+                            <option v-for="chap in chapters" :value="chap.replace('.txt', '')">{{ chap.replace('.txt', '') }}</option>
+                        </select>
+                        <input type="text" v-model="workflowChapterName" placeholder="例如：第一章" class="flex-1 text-sm border border-gray-300 rounded p-2 focus:ring-1 focus:ring-blue-500 outline-none">
+                    </div>
+                </div>
+
+                <div v-if="workflowScriptType === 'f5a'" class="mb-3">
+                    <label class="text-xs text-gray-500 block mb-1">章节简述 (剧情概要)</label>
+                    <textarea v-model="workflowChapterBrief" placeholder="输入本章发生的核心事件..." class="w-full text-sm border border-gray-300 rounded p-2 h-20 outline-none focus:ring-1 focus:ring-blue-500"></textarea>
+                </div>
+
+                <button @click="runWorkflowScript" :disabled="!selectedReference && !['f5a', 'f5b', 'f6', 'f7'].includes(workflowScriptType)" class="w-full py-2 bg-blue-50 hover:bg-blue-100 text-blue-700 disabled:opacity-50 text-sm font-medium rounded transition-colors border border-blue-200">
+                    触发执行脚本
+                </button>
+            </div>
+        </div>
+
+        <div v-if="activeTab === 'knowledge'" class="flex-1 flex flex-col p-4 overflow-hidden space-y-3">
+            <div class="bg-white p-3 rounded-lg shadow-sm border border-gray-200 shrink-0">
+                <div class="flex items-center gap-2 mb-3">
+                    <label class="text-xs text-gray-500 w-16">目标项目:</label>
+                    <select v-model="kbProject" @change="fetchKbFilesList" class="flex-1 text-sm bg-gray-50 border border-gray-200 rounded p-1.5 outline-none">
+                        <option value="">-- 选择项目 --</option>
+                        <option v-for="p in projects" :value="p">{{ p }}</option>
+                    </select>
+                </div>
+                <div class="flex items-center gap-2">
+                    <label class="text-xs text-gray-500 w-16">设定文件:</label>
+                    <select v-model="kbSelectedFile" @change="fetchKbContent" class="flex-1 text-sm bg-gray-50 border border-gray-200 rounded p-1.5 outline-none" :disabled="!kbProject">
+                        <option value="">-- 选择需修改的数据表单 --</option>
+                        <option value="features.md">文风特征设定 (features.md)</option>
+                        <option value="world_settings.md">世界观设定 (world_settings.md)</option>
+                        <option value="positive_words.md">正面词库 (positive_words.md)</option>
+                        <option value="negative_words.md">负面词库 (negative_words.md)</option>
+                        </select>
+                </div>
+            </div>
+
+            <div class="flex-1 bg-white rounded-lg shadow-sm border border-gray-200 flex flex-col overflow-hidden relative">
+                <div class="px-4 py-2 bg-gray-50 border-b border-gray-200 text-xs text-gray-400 flex justify-between items-center">
+                    <span>设定表单编辑器 (Markdown支持)</span>
+                    <button @click="saveKbContent" :disabled="!kbSelectedFile" class="text-blue-600 hover:text-blue-800 disabled:opacity-50">
+                        <i class="fa-solid fa-save"></i> 覆写落盘
+                    </button>
+                </div>
+                <textarea v-model="kbContent" class="flex-1 w-full p-4 resize-none outline-none text-sm text-gray-700 bg-transparent font-mono" placeholder="请选择设定文件进行可视化修改..."></textarea>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    const { createApp, ref, computed, watch, onMounted } = Vue;
+
+    createApp({
+        setup() {
+            // 全局配置
+            const config = ref({
+                showWorkspace: true, layoutRatio: 45, fontSize: 14,
+                apiKey: localStorage.getItem('deepseekApiKey') || '',
+                globalForbidden: '政治,暴力,色情',
+                retryLimit: 1, forbiddenTolerance: 1
+            });
+
+            // 消息与历史会话数据模型
+            const getNewChatTemplate = (id, title) => ({
+                id, title, model: 'deepseek-chat', systemPrompt: '', localForbidden: '',
+                temperature: 0.5, top_p: 0.4, max_tokens: null, 
+                stats: { local_hit_count: 0 }, messages: []
+            });
+
+            const chats = ref([ getNewChatTemplate('chat_1', '默认对话') ]);
+            const currentChatId = ref('chat_1');
+            const chatInput = ref('');
+            const isGenerating = ref(false);
+            let abortController = null;
+
+            // 工作台状态
+            const activeTab = ref('editor');
+            const projects = ref([]);
+            const currentProject = ref('');
+            const chapters = ref([]);
+            const currentChapter = ref('');
+            const editorContent = ref('');
+            const saveStatus = ref('已保存');
+            let saveTimeout = null;
+
+            // 自动化工作流参数
+            const references = ref([]);
+            const selectedReference = ref('');
+            
+            // 任务管理
+            const taskList = ref([]);
+            const showAllTasks = ref(false);
+            const visibleTasks = computed(() => showAllTasks.value ? taskList.value : taskList.value.slice(0, 5));
+
+            const pollTasks = async () => {
+                try {
+                    const res = await fetch('/api/tasks');
+                    if(res.ok) {
+                        taskList.value = await res.json();
+                    }
+                } catch(e) { console.error("轮询任务失败", e); }
+            };
+            // 启动轮询
+            setInterval(pollTasks, 2000);
+
+            const newProjectName = ref('');
+            const workflowScriptType = ref('f1a');
+            const workflowModel = ref('deepseek-chat');
+            const workflowCharName = ref('');
+            const workflowCharSelect = ref('');
+            const workflowChapterName = ref('');
+            const workflowChapterSelect = ref('');
+            const workflowChapterBrief = ref('');
+            const projectCharacters = ref([]);
+
+            // 知识库管理状态
+            const kbProject = ref('');
+            const kbSelectedFile = ref('');
+            const kbContent = ref('');
+
+            const currentChat = computed(() => chats.value.find(c => c.id === currentChatId.value));
+            
+            // 敏感词正则拦截器
+            const forbiddenRegex = computed(() => {
+                const globalWords = config.value.globalForbidden.split(/[,，、\n\s]+/).map(w => w.trim()).filter(Boolean);
+                const localWords = (currentChat.value?.localForbidden || '').split(/[,，、\n\s]+/).map(w => w.trim()).filter(Boolean);
+                const allWords = [...new Set([...globalWords, ...localWords])];
+                if (allWords.length === 0) return null;
+                return new RegExp(`(${allWords.join('|')})`, 'gi');
+            });
+
+            watch(() => config.value.apiKey, val => localStorage.setItem('deepseekApiKey', val));
+            
+            // 会话管理
+            const createNewChat = () => {
+                const newId = 'chat_' + Date.now();
+                chats.value.unshift(getNewChatTemplate(newId, '新计算进程'));
+                currentChatId.value = newId;
+            };
+            const copyCurrentChat = () => {
+                if(!currentChat.value) return;
+                const newId = 'chat_' + Date.now();
+                const copy = JSON.parse(JSON.stringify(currentChat.value));
+                copy.id = newId;
+                copy.title += ' (复刻)';
+                chats.value.unshift(copy);
+                currentChatId.value = newId;
+            };
+            const clearCurrentChatMessages = () => {
+                if (currentChat.value) currentChat.value.messages = [];
+            };
+
+            const scrollToBottom = () => {
+                setTimeout(() => {
+                    const el = document.getElementById('chatContainer');
+                    if(el) el.scrollTop = el.scrollHeight;
+                }, 50);
+            };
+
+            const stopGeneration = () => {
+                if (abortController) {
+                    abortController.abort();
+                    isGenerating.value = false;
+                }
+            };
+
+            // 发送指令及流式接收处理
+            const sendMessage = async () => {
+                if(!chatInput.value.trim() || isGenerating.value || !currentChat.value) return;
+                if(!config.value.apiKey) { alert('系统阻断：未配置有效 API 凭证。'); return; }
+
+                const userText = chatInput.value.trim();
+                currentChat.value.messages.push({ role: 'user', content: userText });
+                chatInput.value = '';
+                scrollToBottom();
+
+                // 注入带版本树的初始响应节点
+                const aiMessage = { 
+                    role: 'assistant', 
+                    versions: [{ content: '' }], 
+                    active_version: 0 
+                };
+                
+                // 若该会话历史中已有消息，触发重生逻辑时增加版本，此处为通用流处理
+                currentChat.value.messages.push(aiMessage);
+                isGenerating.value = true;
+                abortController = new AbortController();
+
+                // 构造剔除前端扩展字段的纯净 payload 提交给后端
+                const apiMessages = currentChat.value.messages.slice(0, -1).map(m => ({
+                    role: m.role,
+                    content: m.role === 'user' ? m.content : m.versions[m.active_version].content
+                }));
+
+                try {
+                    const payload = {
+                        api_key: config.value.apiKey,
+                        model: currentChat.value.model,
+                        messages: apiMessages,
+                        system_prompt: currentChat.value.systemPrompt,
+                        temperature: currentChat.value.temperature,
+                        top_p: currentChat.value.top_p
+                    };
+
+                    const response = await fetch('/api/chat', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload),
+                        signal: abortController.signal
+                    });
+
+                    if (!response.ok) throw new Error("API 请求反馈异常状态");
+
+                    const reader = response.body.getReader();
+                    const decoder = new TextDecoder("utf-8");
+                    
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+                        const chunk = decoder.decode(value, { stream: true });
+                        aiMessage.versions[aiMessage.active_version].content += chunk;
+                        scrollToBottom();
+                    }
+                } catch (error) {
+                    if (error.name === 'AbortError') {
+                        aiMessage.versions[aiMessage.active_version].content += '\n\n[🛑 请求已被主动阻断]';
+                    } else {
+                        aiMessage.versions[aiMessage.active_version].content += `\n\n[系统异常抛出: ${error.message}]`;
+                    }
+                } finally {
+                    isGenerating.value = false;
+                }
+            };
+
+            // 敏感词拦截与 Markdown 渲染
+            const renderMarkdown = (text) => {
+                if (!text) return '';
+                let parsed = marked.parse(text);
+                if (forbiddenRegex.value) {
+                    const matches = text.match(forbiddenRegex.value);
+                    if (matches && currentChat.value) {
+                        currentChat.value.stats.local_hit_count += matches.length;
+                    }
+                    parsed = parsed.replace(forbiddenRegex.value, '<span class="forbidden-highlight">$1</span>');
+                }
+                return parsed;
+            };
+
+            // 内容编辑器交互逻辑
+            const loadProjects = async () => {
+                const res = await fetch('/api/projects');
+                projects.value = await res.json();
+                if(projects.value.length && !currentProject.value) {
+                    currentProject.value = projects.value[0];
+                    fetchChapters();
+                    fetchProjectCharacters();
+                }
+            };
+            const fetchChapters = async () => {
+                if(!currentProject.value) return;
+                const res = await fetch(`/api/projects/${currentProject.value}/chapters`);
+                chapters.value = await res.json();
+                if(chapters.value.length) {
+                    currentChapter.value = chapters.value[0];
+                    fetchContent();
+                } else { currentChapter.value = ''; editorContent.value = ''; }
+            };
+            const fetchProjectCharacters = async () => {
+                if(!currentProject.value) return;
+                try {
+                    const res = await fetch(`/api/projects/${currentProject.value}/characters`);
+                    projectCharacters.value = await res.json();
+                } catch(e) { console.error(e); }
+            };
+            const fetchContent = async () => {
+                if(!currentProject.value || !currentChapter.value) return;
+                const res = await fetch(`/api/projects/${currentProject.value}/chapters/${currentChapter.value}/content`);
+                const data = await res.json();
+                editorContent.value = data.content;
+                saveStatus.value = '已同步';
+            };
+            const debouncedSave = () => {
+                saveStatus.value = '修改侦测中...';
+                clearTimeout(saveTimeout);
+                saveTimeout = setTimeout(async () => {
+                    if(!currentProject.value || !currentChapter.value) return;
+                    saveStatus.value = '执行落盘...';
+                    await fetch(`/api/projects/${currentProject.value}/chapters/${currentChapter.value}/content`, {
+                        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ content: editorContent.value })
+                    });
+                    saveStatus.value = '已保存';
+                }, 1000);
+            };
+            const addChapter = async () => {
+                const name = prompt("请输入预生成章节名称 (不需加后缀)：", "新章节");
+                if(name && name.trim()) {
+                    await fetch(`/api/projects/${currentProject.value}/chapters/${name.trim()}`, { method: 'POST' });
+                    await fetchChapters();
+                    currentChapter.value = name.trim() + '.txt';
+                    fetchContent();
+                }
+            };
+            const renameChapter = async () => {
+                const oldName = currentChapter.value.replace('.txt', '');
+                const name = prompt("覆写原章节名：", oldName);
+                if(name && name.trim() && name !== oldName) {
+                    await fetch(`/api/projects/${currentProject.value}/chapters/${oldName}?new_name=${name.trim()}`, { method: 'POST' });
+                    await fetchChapters();
+                    currentChapter.value = name.trim() + '.txt';
+                }
+            };
+            const importToNovel = async (text) => {
+                if(!currentProject.value) return;
+                try {
+                    await fetch(`/api/projects/${currentProject.value}/append`, {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ content: text })
+                    });
+                    if(activeTab.value === 'editor') fetchContent();
+                    alert('导入已执行。');
+                } catch(e) { alert('数据流追加引发异常。'); }
+            };
+
+            // 自动化工作流管理
+            const loadReferences = async () => {
+                const res = await fetch('/api/references');
+                references.value = await res.json();
+            };
+            const runWorkflowScript = async () => {
+                if (workflowScriptType.value === 'f5a') {
+                    if (!currentProject.value || !workflowChapterName.value || !workflowChapterBrief.value) {
+                        alert("请完善项目、章节名及剧情简述信息。"); return;
+                    }
+                    await fetch('/api/scripts/f5a_outline', {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ 
+                            project_name: currentProject.value, 
+                            chapter_name: workflowChapterName.value, 
+                            chapter_brief: workflowChapterBrief.value,
+                            model: workflowModel.value
+                        })
+                    });
+                    await pollTasks(); // 立即刷新任务列表
+                    return;
+                }
+
+                if (workflowScriptType.value === 'f5b') {
+                    if (!currentProject.value || !workflowChapterName.value) {
+                        alert("请指定项目及章节名。"); return;
+                    }
+                    // f5b 是流式接口，这里简单触发，不做流式展示，或提示用户
+                    fetch('/api/scripts/f5b_generate', {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ 
+                            project_name: currentProject.value, 
+                            chapter_name: workflowChapterName.value,
+                            model: workflowModel.value
+                        })
+                    }).then(() => pollTasks());
+                    setTimeout(pollTasks, 500);
+                    return;
+                }
+
+                let url = `/api/scripts/${workflowScriptType.value}?target_file=${selectedReference.value}`;
+                if (currentProject.value) url += `&project_name=${currentProject.value}`;
+                
+                // 附加模型参数
+                if (['f1b', 'f2b', 'f3a', 'f3b', 'f3c', 'f4a', 'f5a', 'f5b', 'f6', 'f7'].includes(workflowScriptType.value)) {
+                    url += `&model=${workflowModel.value}`;
+                }
+                
+                if (['f5a', 'f5b', 'f7'].includes(workflowScriptType.value)) {
+                     if (!workflowChapterName.value.trim()) { alert("需指明目标章节名。"); return; }
+                     url += `&chapter_name=${workflowChapterName.value.trim()}`;
+                }
+
+                if (workflowScriptType.value === 'f3c') {
+                    if (!workflowCharName.value.trim()) {
+                        alert("需指明目标角色名参数。");
+                        return;
+                    }
+                    url += `&character=${workflowCharName.value.trim()}`;
+                }
+                
+                await fetch(url, { method: 'POST' });
+                await pollTasks(); // 立即刷新
+            };
+            const createProject = async () => {
+                await fetch('/api/projects', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: newProjectName.value })
+                });
+                newProjectName.value = '';
+                alert('底层工程目录及配置文件建立完毕。');
+                await loadProjects();
+                currentProject.value = projects.value[projects.value.length - 1];
+                activeTab.value = 'editor';
+            };
+
+            // 知识库文件交互 (依赖后端补全相应通用读写 API)
+            const fetchKbFilesList = () => {
+                kbSelectedFile.value = '';
+                kbContent.value = '';
+            };
+            const fetchKbContent = async () => {
+                if (!kbProject.value || !kbSelectedFile.value) return;
+                // 假设后端添加了针对设定文件的专设读路由: /api/projects/{proj}/settings/{file}
+                try {
+                    const res = await fetch(`/api/projects/${kbProject.value}/settings/${kbSelectedFile.value}`);
+                    if (res.ok) {
+                        const data = await res.json();
+                        kbContent.value = data.content;
+                    } else {
+                        kbContent.value = "无法加载数据或文件尚不存在。";
+                    }
+                } catch (e) {
+                    kbContent.value = "文件读取拦截，请检查环境服务接口配置。";
+                }
+            };
+            const saveKbContent = async () => {
+                if (!kbProject.value || !kbSelectedFile.value) return;
+                try {
+                    await fetch(`/api/projects/${kbProject.value}/settings/${kbSelectedFile.value}`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ content: kbContent.value })
+                    });
+                    alert("数据节点已物理落盘。");
+                } catch (e) {
+                    alert("执行覆写操作失败。");
+                }
+            };
+
+            onMounted(() => { loadProjects(); loadReferences(); });
+
+            return {
+                config, chats, currentChatId, currentChat, chatInput, isGenerating,
+                activeTab, projects, currentProject, chapters, currentChapter, editorContent, saveStatus,
+                references, selectedReference, newProjectName, workflowScriptType, workflowCharName,
+                kbProject, kbSelectedFile, kbContent, taskList, showAllTasks, visibleTasks,
+                createNewChat, copyCurrentChat, clearCurrentChatMessages, sendMessage, stopGeneration, renderMarkdown,
+                fetchChapters, fetchContent, debouncedSave, addChapter, renameChapter, importToNovel,
+                runWorkflowScript, createProject, fetchKbFilesList, fetchKbContent, saveKbContent,
+                workflowModel
+            };
+        }
+    }).mount('#app');
+</script>
+</body>
+</html>
