@@ -1,19 +1,24 @@
-import sys
-import argparse
-import jieba
 import os
 import math
-from collections import Counter
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+import argparse
 import threading
+from collections import Counter
+import jieba
 
-# --- 物理目录严格对齐架构图 ---
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(BASE_DIR)
-INPUT_DIR = os.path.join(PROJECT_ROOT, "reference_novels")
-STYLE_DIR = os.path.join(PROJECT_ROOT, "text_style_imitation")
-PROJ_DIR = os.path.join(PROJECT_ROOT, "novel_projects")
+# =====================================================================
+# 1. 跨目录寻址：将父目录(style_imitation_code)加入环境变量
+# =====================================================================
+import sys
+current_dir = os.path.dirname(os.path.abspath(__file__)) # 指向 scripts/
+parent_dir = os.path.dirname(current_dir)                # 指向 style_imitation_code/
+if parent_dir not in sys.path:
+    sys.path.append(parent_dir)
+
+# =====================================================================
+# 2. 导入 core 模块 (注意加 core. 前缀)
+# =====================================================================
+from core._core_config import BASE_DIR, PROJECT_ROOT, REFERENCE_DIR, STYLE_DIR, PROJ_DIR
+from core._core_utils import smart_read_text
 
 PUNCTUATIONS = set("，。！？；：“”‘’（）【】《》、\n\r \t.!?,-[]")
 
@@ -27,7 +32,7 @@ class WordFreqAnalyzerApp:
         self.create_widgets()
 
     def ensure_directories(self):
-        for directory in [INPUT_DIR, STYLE_DIR, PROJ_DIR]:
+        for directory in [REFERENCE_DIR, STYLE_DIR, PROJ_DIR]:
             os.makedirs(directory, exist_ok=True)
 
     def create_widgets(self):
@@ -70,7 +75,7 @@ class WordFreqAnalyzerApp:
         self.root.update_idletasks()
 
     def select_file(self):
-        init_dir = INPUT_DIR if os.path.exists(INPUT_DIR) else BASE_DIR
+        init_dir = REFERENCE_DIR if os.path.exists(REFERENCE_DIR) else BASE_DIR
         path = filedialog.askopenfilename(initialdir=init_dir, title="选择原文", filetypes=[("Text Files", "*.txt")])
         if path: self.file_path_var.set(path)
 
@@ -87,16 +92,8 @@ class WordFreqAnalyzerApp:
 
     def run_extraction(self, file_path):
         try:
-            try:
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    content = f.read()
-            except UnicodeDecodeError:
-                with open(file_path, 'r', encoding='gbk') as f:
-                    content = f.read()
-
+            content = smart_read_text(file_path)
             novel_name = os.path.splitext(os.path.basename(file_path))[0]
-            
-            # 严格对齐架构图路径
             out_dir = os.path.join(STYLE_DIR, f"{novel_name}_style_imitation", "statistics")
             os.makedirs(out_dir, exist_ok=True)
 
@@ -110,7 +107,6 @@ class WordFreqAnalyzerApp:
                 self.log("文本过少，无法提取。")
                 return
 
-            # 计算提取数量
             if self.top_n_mode.get() == 1:
                 unique = len(set(valid_words))
                 log_ttr = math.log10(unique) / math.log10(len(valid_words)) if len(valid_words) > 1 else 0
@@ -138,23 +134,13 @@ class WordFreqAnalyzerApp:
         finally:
             self.btn_run.config(state="normal")
 
-# =========================================================================================
-# 后台静默执行逻辑 
-# =========================================================================================
 def run_headless(file_path):
+    import sys
     if not os.path.exists(file_path):
         sys.exit(1)
         
-    try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-    except UnicodeDecodeError:
-        with open(file_path, 'r', encoding='gbk') as f:
-            content = f.read()
-
+    content = smart_read_text(file_path)
     novel_name = os.path.splitext(os.path.basename(file_path))[0]
-    
-    # 严格对齐架构图路径
     out_dir = os.path.join(STYLE_DIR, f"{novel_name}_style_imitation", "statistics")
     os.makedirs(out_dir, exist_ok=True)
 
@@ -163,7 +149,6 @@ def run_headless(file_path):
     if len(valid_words) <= 1: 
         sys.exit(0)
 
-    # 强制动态算法
     unique = len(set(valid_words))
     log_ttr = math.log10(unique) / math.log10(len(valid_words)) if len(valid_words) > 1 else 0
     top_n = max(100, min(8000, int(50 * log_ttr * (len(valid_words) ** (1/3.0)))))
@@ -179,17 +164,19 @@ def run_headless(file_path):
         f.write("\n".join(report))
 
 if __name__ == "__main__":
+    import sys
     parser = argparse.ArgumentParser()
     parser.add_argument("--target_file", type=str, default="")
-    parser.add_argument("--project", type=str, default="") # 占位，静默模式中主动忽略
+    parser.add_argument("--project", type=str, default="") 
     args, unknown = parser.parse_known_args()
     
     if not args.target_file and len(sys.argv) == 1:
+        import tkinter as tk
+        from tkinter import ttk, filedialog, messagebox
         root = tk.Tk()
         app = WordFreqAnalyzerApp(root)
         root.mainloop()
     else:
         if not args.target_file and unknown and not unknown[0].startswith('--'):
             args.target_file = unknown[0]
-        # 忽略 project，确保完全落盘在 reference 的归属文件树中
         run_headless(args.target_file)

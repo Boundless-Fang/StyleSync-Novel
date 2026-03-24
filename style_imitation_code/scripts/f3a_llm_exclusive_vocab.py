@@ -1,28 +1,25 @@
-import sys
-import argparse
 import os
-
-# 【关键配置】：在导入模型库之前，强制设置 HuggingFace 国内镜像源环境
-os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-
-import requests
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
-import threading
-from dotenv import load_dotenv
-import numpy as np
-import faiss
-from sentence_transformers import SentenceTransformer
 import re
+import json
+import argparse
+import threading
 
-load_dotenv()
+# =====================================================================
+# 1. 跨目录寻址：将父目录(style_imitation_code)加入环境变量
+# =====================================================================
+import sys
+current_dir = os.path.dirname(os.path.abspath(__file__)) # 指向 scripts/
+parent_dir = os.path.dirname(current_dir)                # 指向 style_imitation_code/
+if parent_dir not in sys.path:
+    sys.path.append(parent_dir)
 
-# --- 物理目录对齐 ---
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(BASE_DIR)
-REFERENCE_DIR = os.path.join(PROJECT_ROOT, "reference_novels")
-STYLE_DIR = os.path.join(PROJECT_ROOT, "text_style_imitation")
-PROJ_DIR = os.path.join(PROJECT_ROOT, "novel_projects")
+# =====================================================================
+# 2. 导入 core 模块 (注意加 core. 前缀)
+# =====================================================================
+from core._core_config import BASE_DIR, PROJECT_ROOT, REFERENCE_DIR, STYLE_DIR, PROJ_DIR
+from core._core_utils import smart_read_text
+from core._core_llm import call_deepseek_api
+from core._core_rag import RAGRetriever
 
 class ExclusiveVocabApp:
     def __init__(self, root):
@@ -52,7 +49,7 @@ class ExclusiveVocabApp:
 
         self.log_text = tk.Text(self.root, height=10, width=80, state="disabled", bg="#f8f9fa")
         self.log_text.pack(padx=10, pady=5)
-        self.log("系统就绪。已配置默认国内镜像源。首次运行将自动下载本地 Embedding 模型。")
+        self.log("系统就绪。将调用 _core_rag 进行 1024 维高精度检索。")
 
     def log(self, message):
         self.log_text.config(state="normal")
@@ -82,49 +79,27 @@ class ExclusiveVocabApp:
         self.btn_process.config(state="normal")
 
     @staticmethod
-    def chunk_text(text, max_len=600):
-        """将全量文本按照段落切分为固定长度的文本块"""
-        paragraphs = [p.strip() for p in text.split('\n') if p.strip()]
-        chunks = []
-        current_chunk = ""
-        for p in paragraphs:
-            if len(current_chunk) + len(p) <= max_len:
-                current_chunk += p + "\n"
-            else:
-                if current_chunk:
-                    chunks.append(current_chunk.strip())
-                current_chunk = p + "\n"
-        if current_chunk:
-            chunks.append(current_chunk.strip())
-        return chunks
-
-    @staticmethod
     def execute_extraction(original_path, model, log_func, project_name=None):
         try:
             novel_name = os.path.splitext(os.path.basename(original_path))[0]
             words_path = os.path.join(STYLE_DIR, f"{novel_name}_style_imitation", "statistics", "高频词.txt")
 
-            # 1. 读取全量文件与高频词
+            style_dir = os.path.join(STYLE_DIR, f"{novel_name}_style_imitation")
+            rag_db_dir = os.path.join(style_dir, "global_rag_db")
+            index_path = os.path.join(rag_db_dir, "vector.index")
+            chunks_path = os.path.join(rag_db_dir, "chunks.json")
+
+            if not os.path.exists(index_path) or not os.path.exists(chunks_path):
+                 log_func("❌ 致命错误：未找到全局 RAG 索引。请先执行 f0 初始化！")
+                 return False
+
             try:
-                try:
-                    with open(original_path, 'r', encoding='utf-8') as f:
-                        full_text = f.read()
-                except UnicodeDecodeError:
-                    with open(original_path, 'r', encoding='gbk') as f:
-                        full_text = f.read()
-                
                 words_text = ""
                 query_keywords = []
                 if os.path.exists(words_path):
-                    try:
-                        with open(words_path, 'r', encoding='utf-8') as f:
-                            words_text = f.read()
-                    except UnicodeDecodeError:
-                        with open(words_path, 'r', encoding='gbk') as f:
-                            words_text = f.read()
-                    # 提取高频词列表中括号前的内容作为检索词汇
+                    words_text = smart_read_text(words_path)
                     matches = re.findall(r'(\S+)\(\d+\)', words_text)
-                    query_keywords = matches[:100] # 取前100个高频词作为RAG检索的锚点
+                    query_keywords = matches[:100]
                 else:
                     log_func("警告：未找到本地高频词文件，无法进行精准 RAG 检索。")
                     return False
@@ -132,51 +107,32 @@ class ExclusiveVocabApp:
                 log_func(f"读取文件失败: {e}")
                 return False
 
+            os.makedirs(style_dir, exist_ok=True)
+            save_path = os.path.join(style_dir, "exclusive_vocab.md")
+            
+            project_save_path = None
             if project_name:
-                target_dir = os.path.join(PROJ_DIR, project_name)
-            else:
-                target_dir = os.path.join(STYLE_DIR, f"{novel_name}_style_imitation")
-            os.makedirs(target_dir, exist_ok=True)
-            save_path = os.path.join(target_dir, "exclusive_vocab.md")
+                project_dir = os.path.join(PROJ_DIR, project_name)
+                os.makedirs(project_dir, exist_ok=True)
+                project_save_path = os.path.join(project_dir, "exclusive_vocab.md")
 
-            # 2. 文本分块与向量化 (RAG 核心逻辑)
-            log_func("正在进行全量文本分块与本地向量化计算...")
+            # 统一调用 _core_rag 进行安全加载与检索
+            log_func("正在加载全局 RAG 索引...")
             try:
-                # 加载轻量级中文 Embedding 模型 (会自动从配置的镜像源拉取)
-                embedder = SentenceTransformer('shibing624/text2vec-base-chinese')
+                retriever = RAGRetriever()
+                index, chunks = retriever.load_index(index_path, chunks_path)
+                log_func(f"已加载索引，包含 {len(chunks)} 个文本块。")
                 
-                chunks = ExclusiveVocabApp.chunk_text(full_text)
-                log_func(f"全文切分为 {len(chunks)} 个文本块。正在生成向量库...")
-                
-                chunk_embeddings = embedder.encode(chunks, show_progress_bar=False)
-                
-                # 构建 FAISS 索引
-                dimension = chunk_embeddings.shape[1]
-                index = faiss.IndexFlatL2(dimension)
-                index.add(np.array(chunk_embeddings).astype('float32'))
-                
-                # 3. 根据高频词进行检索
                 log_func("正在检索与高频词关联的上下文文本块...")
-                retrieved_chunks = set()
-                
-                # 将高频词分为 10 组进行批查询以加快速度
-                for i in range(0, len(query_keywords), 10):
-                    batch_queries = [" ".join(query_keywords[i:i+10])]
-                    query_vec = embedder.encode(batch_queries)
-                    distances, indices = index.search(np.array(query_vec).astype('float32'), k=5) # 每组查询取最相关的前5个块
-                    for idx in indices[0]:
-                        if idx != -1:
-                            retrieved_chunks.add(chunks[idx])
-                
-                # 拼接召回的上下文
-                context_text = "\n...\n".join(list(retrieved_chunks)[:30]) # 限制最终提交给 LLM 的块数量，控制在安全 Token 范围内
-                log_func(f"成功召回 {len(retrieved_chunks)} 个高相关度片段，即将请求大模型。")
+                retrieved_chunks = retriever.search(index, chunks, query_keywords, k=5, batch_size=10)
+                context_text = "\n...\n".join(retrieved_chunks[:30])
+                log_func(f"成功召回 {min(len(retrieved_chunks), 30)} 个高相关度片段，即将请求大模型。")
                 
             except Exception as e:
                 log_func(f"❌ 向量化或检索失败: {str(e)}")
                 return False
 
-            # 4. 请求大语言模型
+            # 统一调用 _core_llm 请求大语言模型
             prompt_header = """按照以下格式整理该文本的专属词汇库
 角色名字
 力量体系（如境界、功法、体质）
@@ -188,26 +144,21 @@ class ExclusiveVocabApp:
 【高频词参考】：
 """
             prompt = prompt_header + words_text + "\n\n【文本高相关度片段】：\n" + context_text
+            sys_prompt = "你是一个严谨的信息提取助手。只允许输出 Markdown 格式的纯文本列表。"
 
-            api_key = os.getenv("DEEPSEEK_API_KEY")
-            headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
-            payload = {
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": "你是一个严谨的信息提取助手。只允许输出 Markdown 格式的纯文本列表。"},
-                    {"role": "user", "content": prompt}
-                ],
-                "temperature": 0.2
-            }
-            
             try:
-                response = requests.post("https://api.deepseek.com/chat/completions", headers=headers, json=payload, timeout=180)
-                response.raise_for_status()
-                result_text = response.json()['choices'][0]['message']['content'].strip()
+                result_text = call_deepseek_api(system_prompt=sys_prompt, user_prompt=prompt, model=model, temperature=0.2)
                 
                 with open(save_path, 'w', encoding='utf-8') as f:
                     f.write(result_text)
-                log_func(f"✅ 提取完成！文件落盘至: {save_path}")
+                    
+                msg = f"✅ 提取完成！文件落盘至: {save_path}"
+                if project_save_path:
+                    import shutil
+                    shutil.copy2(save_path, project_save_path)
+                    msg += f"\n已同步备份至项目目录: {project_save_path}"
+                    
+                log_func(msg)
                 return True
             except Exception as e:
                 log_func(f"❌ API 调用失败: {str(e)}")
@@ -219,6 +170,7 @@ class ExclusiveVocabApp:
             return False
 
 def run_headless(target_file, project_name=None, model="deepseek-chat"):
+    import sys
     if os.path.isabs(target_file):
         original_path = target_file
     else:
@@ -233,6 +185,7 @@ def run_headless(target_file, project_name=None, model="deepseek-chat"):
     if not success: sys.exit(1)
 
 if __name__ == "__main__":
+    import sys
     parser = argparse.ArgumentParser()
     parser.add_argument("--target_file", type=str, default="")
     parser.add_argument("--project", type=str, default="")
@@ -240,6 +193,8 @@ if __name__ == "__main__":
     args, unknown = parser.parse_known_args()
     
     if not args.target_file and len(sys.argv) == 1:
+        import tkinter as tk
+        from tkinter import ttk, filedialog, messagebox
         root = tk.Tk()
         app = ExclusiveVocabApp(root)
         root.mainloop()

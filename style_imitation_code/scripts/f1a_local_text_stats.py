@@ -1,23 +1,29 @@
-import sys
-import argparse
-import jieba
-import jieba.posseg as pseg
 import os
 import re
 import shutil
-from collections import Counter
-import statistics
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
-import threading
 import math
+import statistics
+from collections import Counter
+import threading
+import argparse
 
-# --- 物理目录严格对齐架构图 ---
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(BASE_DIR)
-INPUT_DIR = os.path.join(PROJECT_ROOT, "reference_novels")
-STYLE_DIR = os.path.join(PROJECT_ROOT, "text_style_imitation")
-PROJ_DIR = os.path.join(PROJECT_ROOT, "novel_projects")
+import jieba
+import jieba.posseg as pseg
+
+# =====================================================================
+# 1. 跨目录寻址：将父目录(style_imitation_code)加入环境变量
+# =====================================================================
+import sys
+current_dir = os.path.dirname(os.path.abspath(__file__)) # 指向 scripts/
+parent_dir = os.path.dirname(current_dir)                # 指向 style_imitation_code/
+if parent_dir not in sys.path:
+    sys.path.append(parent_dir)
+
+# =====================================================================
+# 2. 导入 core 模块 (注意加 core. 前缀)
+# =====================================================================
+from core._core_config import BASE_DIR, PROJECT_ROOT, REFERENCE_DIR, STYLE_DIR, PROJ_DIR
+from core._core_utils import smart_read_text
 
 PUNCTUATIONS = set("，。！？；：“”‘’（）【】《》、\n\r \t.!?,-[]")
 
@@ -31,7 +37,7 @@ class NovelMetricsAnalyzerApp:
         self.create_widgets()
 
     def ensure_directories(self):
-        for directory in [INPUT_DIR, STYLE_DIR, PROJ_DIR]:
+        for directory in [REFERENCE_DIR, STYLE_DIR, PROJ_DIR]:
             os.makedirs(directory, exist_ok=True)
 
     def create_widgets(self):
@@ -58,7 +64,7 @@ class NovelMetricsAnalyzerApp:
         self.root.update_idletasks()
 
     def select_file(self):
-        init_dir = INPUT_DIR if os.path.exists(INPUT_DIR) else BASE_DIR
+        init_dir = REFERENCE_DIR if os.path.exists(REFERENCE_DIR) else BASE_DIR
         path = filedialog.askopenfilename(initialdir=init_dir, title="选择小说文件", filetypes=[("Text Files", "*.txt")])
         if path:
             self.file_path_var.set(path)
@@ -73,26 +79,17 @@ class NovelMetricsAnalyzerApp:
 
     def run_analysis(self, file_path):
         try:
-            try:
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    content = f.read()
-            except UnicodeDecodeError:
-                with open(file_path, 'r', encoding='gbk') as f:
-                    content = f.read()
-
+            content = smart_read_text(file_path)
             novel_name = os.path.splitext(os.path.basename(file_path))[0]
             
-            # 严格对齐架构图：构建 text_style_imitation 下的专属文件夹
             style_novel_dir = os.path.join(STYLE_DIR, f"{novel_name}_style_imitation")
             os.makedirs(style_novel_dir, exist_ok=True)
             
-            # 对齐架构图：自动拷贝原文作为 reference.txt
             ref_path = os.path.join(style_novel_dir, "reference.txt")
             if not os.path.exists(ref_path):
                 shutil.copy2(file_path, ref_path)
                 self.log(">> 已自动备份原文至 reference.txt")
 
-            # 对齐架构图：结果放入 statistics 文件夹
             out_dir = os.path.join(style_novel_dir, "statistics")
             os.makedirs(out_dir, exist_ok=True)
 
@@ -223,26 +220,16 @@ class NovelMetricsAnalyzerApp:
             report.append(f"  {pos} : {count / total * 100:.2f}%")
         report.append("")
 
-# =========================================================================================
-# 后台静默执行逻辑 
-# =========================================================================================
 def run_headless(file_path):
     if not os.path.exists(file_path):
+        import sys
         sys.exit(1)
-    try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-    except UnicodeDecodeError:
-        with open(file_path, 'r', encoding='gbk') as f:
-            content = f.read()
+    content = smart_read_text(file_path)
 
     novel_name = os.path.splitext(os.path.basename(file_path))[0]
-    
-    # 严格对齐架构图路径
     style_novel_dir = os.path.join(STYLE_DIR, f"{novel_name}_style_imitation")
     os.makedirs(style_novel_dir, exist_ok=True)
     
-    # 拷贝 reference
     ref_path = os.path.join(style_novel_dir, "reference.txt")
     if not os.path.exists(ref_path):
         shutil.copy2(file_path, ref_path)
@@ -262,17 +249,19 @@ def run_headless(file_path):
         f.write("\n".join(report))
 
 if __name__ == "__main__":
+    import sys
     parser = argparse.ArgumentParser()
     parser.add_argument("--target_file", type=str, default="")
-    parser.add_argument("--project", type=str, default="") # 保留接收入口，但代码中不使用，避免main.py传参报错
+    parser.add_argument("--project", type=str, default="") 
     args, unknown = parser.parse_known_args()
     
     if not args.target_file and len(sys.argv) == 1:
+        import tkinter as tk
+        from tkinter import ttk, filedialog, messagebox
         root = tk.Tk()
         app = NovelMetricsAnalyzerApp(root)
         root.mainloop()
     else:
         if not args.target_file and unknown and not unknown[0].startswith('--'):
             args.target_file = unknown[0]
-        # 静默模式不再传递 project_name
         run_headless(args.target_file)

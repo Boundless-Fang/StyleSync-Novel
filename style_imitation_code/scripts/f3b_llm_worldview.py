@@ -1,28 +1,25 @@
-import sys
-import argparse
 import os
-
-# 【关键配置】：强制设置 HuggingFace 国内镜像源环境，确保模型稳定下载
-os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-
-import requests
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
-import threading
-from dotenv import load_dotenv
-import numpy as np
-import faiss
-from sentence_transformers import SentenceTransformer
 import re
+import json
+import argparse
+import threading
 
-load_dotenv()
+# =====================================================================
+# 1. 跨目录寻址：将父目录(style_imitation_code)加入环境变量
+# =====================================================================
+import sys
+current_dir = os.path.dirname(os.path.abspath(__file__)) # 指向 scripts/
+parent_dir = os.path.dirname(current_dir)                # 指向 style_imitation_code/
+if parent_dir not in sys.path:
+    sys.path.append(parent_dir)
 
-# --- 物理目录对齐 ---
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(BASE_DIR)
-REFERENCE_DIR = os.path.join(PROJECT_ROOT, "reference_novels")
-STYLE_DIR = os.path.join(PROJECT_ROOT, "text_style_imitation")
-PROJ_DIR = os.path.join(PROJECT_ROOT, "novel_projects")
+# =====================================================================
+# 2. 导入 core 模块 (注意加 core. 前缀)
+# =====================================================================
+from core._core_config import BASE_DIR, PROJECT_ROOT, REFERENCE_DIR, STYLE_DIR, PROJ_DIR
+from core._core_utils import smart_read_text
+from core._core_llm import call_deepseek_api
+from core._core_rag import RAGRetriever
 
 class WorldviewApp:
     def __init__(self, root):
@@ -82,60 +79,36 @@ class WorldviewApp:
         self.btn_process.config(state="normal")
 
     @staticmethod
-    def chunk_text(text, max_len=600):
-        """将全量文本按照段落切分为固定长度的文本块"""
-        paragraphs = [p.strip() for p in text.split('\n') if p.strip()]
-        chunks = []
-        current_chunk = ""
-        for p in paragraphs:
-            if len(current_chunk) + len(p) <= max_len:
-                current_chunk += p + "\n"
-            else:
-                if current_chunk:
-                    chunks.append(current_chunk.strip())
-                current_chunk = p + "\n"
-        if current_chunk:
-            chunks.append(current_chunk.strip())
-        return chunks
-
-    @staticmethod
     def execute_extraction(original_path, model, log_func, project_name=None):
         try:
             novel_name = os.path.splitext(os.path.basename(original_path))[0]
+            style_dir = os.path.join(STYLE_DIR, f"{novel_name}_style_imitation")
+            os.makedirs(style_dir, exist_ok=True)
             
-            # 确定读取与落盘的物理路径
-            if project_name:
-                target_dir = os.path.join(PROJ_DIR, project_name)
-            else:
-                target_dir = os.path.join(STYLE_DIR, f"{novel_name}_style_imitation")
-            os.makedirs(target_dir, exist_ok=True)
-            
-            vocab_path = os.path.join(target_dir, "exclusive_vocab.md")
-            save_path = os.path.join(target_dir, "world_settings.md")
+            rag_db_dir = os.path.join(style_dir, "global_rag_db")
+            index_path = os.path.join(rag_db_dir, "vector.index")
+            chunks_path = os.path.join(rag_db_dir, "chunks.json")
 
-            # 1. 强制读取 f3a 的专属词库与全量原文
+            if not os.path.exists(index_path) or not os.path.exists(chunks_path):
+                 log_func("❌ 致命错误：未找到全局 RAG 索引。请先执行 f0 初始化！")
+                 return False
+
+            vocab_path = os.path.join(style_dir, "exclusive_vocab.md")
+            save_path = os.path.join(style_dir, "world_settings.md")
+            
+            project_save_path = None
+            if project_name:
+                project_dir = os.path.join(PROJ_DIR, project_name)
+                os.makedirs(project_dir, exist_ok=True)
+                project_save_path = os.path.join(project_dir, "world_settings.md")
+
             try:
-                try:
-                    with open(original_path, 'r', encoding='utf-8') as f:
-                        full_text = f.read()
-                except UnicodeDecodeError:
-                    with open(original_path, 'r', encoding='gbk') as f:
-                        full_text = f.read()
-                
                 vocab_text = ""
                 query_keywords = []
                 if os.path.exists(vocab_path):
-                    try:
-                        with open(vocab_path, 'r', encoding='utf-8') as f:
-                            vocab_text = f.read()
-                    except UnicodeDecodeError:
-                        with open(vocab_path, 'r', encoding='gbk') as f:
-                            vocab_text = f.read()
-                    # 使用正则提取专属词库中 "-" 后和 "：" 前的具体名词作为检索探针
-                    # 例如：从 "- 降龙十八掌：丐帮绝学" 中提取出 "降龙十八掌"
+                    vocab_text = smart_read_text(vocab_path)
                     matches = re.findall(r'-\s*(.*?)[：:]', vocab_text)
                     query_keywords = [m.strip() for m in matches if m.strip()]
-                    
                     if not query_keywords:
                         log_func("警告：专属词库存在，但未能提取出有效探针，可能格式有误。")
                 else:
@@ -145,45 +118,24 @@ class WorldviewApp:
                 log_func(f"读取文件失败: {e}")
                 return False
 
-            # 2. 文本分块与向量化 (RAG 核心逻辑)
-            log_func("正在进行全量文本分块与本地向量化计算...")
+            log_func("正在加载全局 RAG 索引...")
             try:
-                embedder = SentenceTransformer('shibing624/text2vec-base-chinese')
-                chunks = WorldviewApp.chunk_text(full_text)
-                log_func(f"全文切分为 {len(chunks)} 个文本块。正在生成向量库...")
+                retriever = RAGRetriever()
+                index, chunks = retriever.load_index(index_path, chunks_path)
+                log_func(f"已加载索引，包含 {len(chunks)} 个文本块。")
                 
-                chunk_embeddings = embedder.encode(chunks, show_progress_bar=False)
-                
-                dimension = chunk_embeddings.shape[1]
-                index = faiss.IndexFlatL2(dimension)
-                index.add(np.array(chunk_embeddings).astype('float32'))
-                
-                # 3. 利用 f3a 的专属名词作为探针进行精准检索
                 log_func(f"正在使用 {len(query_keywords)} 个专属名词检索核心设定片段...")
-                retrieved_chunks = set()
-                
-                # 引入额外的世界观高维引导词，强行逼迫 RAG 抓取底层规则
                 meta_queries = ["境界 突破 修炼 功法", "版图 国家 大陆 势力", "历史 传说 宗门 战争"]
                 all_queries = meta_queries + query_keywords
                 
-                # 批量查询提升速度
-                for i in range(0, len(all_queries), 5):
-                    batch_queries = [" ".join(all_queries[i:i+5])]
-                    query_vec = embedder.encode(batch_queries)
-                    distances, indices = index.search(np.array(query_vec).astype('float32'), k=6) 
-                    for idx in indices[0]:
-                        if idx != -1:
-                            retrieved_chunks.add(chunks[idx])
-                
-                # 拼接召回的上下文 (控制在安全 Token 范围内)
-                context_text = "\n...\n".join(list(retrieved_chunks)[:40])
-                log_func(f"成功召回 {len(retrieved_chunks)} 个强相关设定片段，即将请求大模型。")
+                retrieved_chunks = retriever.search(index, chunks, all_queries, k=6, batch_size=5)
+                context_text = "\n...\n".join(retrieved_chunks[:40])
+                log_func(f"成功召回 {min(len(retrieved_chunks), 40)} 个强相关设定片段，即将请求大模型。")
                 
             except Exception as e:
                 log_func(f"❌ 向量化或检索失败: {str(e)}")
                 return False
 
-            # 4. 请求大语言模型构建世界观
             log_func("正在调用大模型重组世界观设定...")
             prompt_header = """【系统指令】：
 请基于提供的“文本高相关度片段”及参考的“专属词库”，构建并补全该小说的世界观设定。
@@ -204,26 +156,21 @@ class WorldviewApp:
 【专属词库参考】：
 """
             prompt = prompt_header + vocab_text + "\n\n【文本高相关度片段 (经 RAG 检索提取)】：\n" + context_text
+            sys_prompt = "你是一个严谨的设定整理专家。只允许输出 Markdown 格式的纯文本，禁止输出多余的寒暄语。"
 
-            api_key = os.getenv("DEEPSEEK_API_KEY")
-            headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
-            payload = {
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": "你是一个严谨的设定整理专家。只允许输出 Markdown 格式的纯文本，禁止输出多余的寒暄语。"},
-                    {"role": "user", "content": prompt}
-                ],
-                "temperature": 0.4 # 允许适度推演
-            }
-            
             try:
-                response = requests.post("https://api.deepseek.com/chat/completions", headers=headers, json=payload, timeout=180)
-                response.raise_for_status()
-                result_text = response.json()['choices'][0]['message']['content'].strip()
+                result_text = call_deepseek_api(system_prompt=sys_prompt, user_prompt=prompt, model=model, temperature=0.4)
                 
                 with open(save_path, 'w', encoding='utf-8') as f:
                     f.write(result_text)
-                log_func(f"✅ 世界观构建完成！文件落盘至: {save_path}")
+                    
+                msg = f"✅ 世界观构建完成！文件落盘至: {save_path}"
+                if project_save_path:
+                    import shutil
+                    shutil.copy2(save_path, project_save_path)
+                    msg += f"\n已同步备份至项目目录: {project_save_path}"
+                    
+                log_func(msg)
                 return True
             except Exception as e:
                 log_func(f"❌ API 调用失败: {str(e)}")
@@ -235,6 +182,7 @@ class WorldviewApp:
             return False
 
 def run_headless(target_file, project_name=None, model="deepseek-chat"):
+    import sys
     if os.path.isabs(target_file):
         original_path = target_file
     else:
@@ -249,6 +197,7 @@ def run_headless(target_file, project_name=None, model="deepseek-chat"):
     if not success: sys.exit(1)
 
 if __name__ == "__main__":
+    import sys
     parser = argparse.ArgumentParser()
     parser.add_argument("--target_file", type=str, default="")
     parser.add_argument("--project", type=str, default="")
@@ -256,6 +205,8 @@ if __name__ == "__main__":
     args, unknown = parser.parse_known_args()
     
     if not args.target_file and len(sys.argv) == 1:
+        import tkinter as tk
+        from tkinter import ttk, filedialog, messagebox
         root = tk.Tk()
         app = WorldviewApp(root)
         root.mainloop()

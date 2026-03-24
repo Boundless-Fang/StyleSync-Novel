@@ -1,19 +1,40 @@
-# 环境变量与密钥文件
+# === 1. 安全与敏感信息 (绝对不能传) ===
 .env
+api_key.txt
+*.pem
+*.key
 
-# 存放小说原文的文件夹
+# === 2. 引擎运行生成的临时碎片 ===
+# 脚本运行中产生的临时向量索引缓存
+temp_*.bin
+temp_*.json
+# 子进程 RAG 检索时可能产生的锁文件或临时拷贝
+temp_read_index_*.bin
+temp_write_index.bin
+
+# === 3. 大体量数据中台 (Data Hub) ===
+# 所有的原著原件
 reference_novels/
-
-# 存放生成小说项目的文件夹
-novel_projects/
-
-# 存放模仿文风的文件夹
+# 所有从原著提取出的文风、词库、向量库
 text_style_imitation/
 
-# Python 运行产生的缓存文件
+# === 4. 个人创作空间 (Workspace) ===
+# 你的小说项目、正文、大纲（保护版权与隐私）
+novel_projects/
+# 所有的沙盒测试代码
+text_testing_code/
+
+# === 5. Python 垃圾与环境 ===
 __pycache__/
 *.py[cod]
 *$py.class
-
-# 虚拟环境文件夹
 venv/
+.venv/
+.pytest_cache/
+.coverage
+
+# === 6. 编辑器相关 (让仓库更干净) ===
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

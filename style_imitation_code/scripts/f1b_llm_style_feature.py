@@ -1,21 +1,23 @@
 import os
-import sys
 import argparse
-import requests
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+import shutil
 import threading
-from dotenv import load_dotenv
 
-# 加载环境变量以获取 API Key
-load_dotenv()
+# =====================================================================
+# 1. 跨目录寻址：将父目录(style_imitation_code)加入环境变量
+# =====================================================================
+import sys
+current_dir = os.path.dirname(os.path.abspath(__file__)) # 指向 scripts/
+parent_dir = os.path.dirname(current_dir)                # 指向 style_imitation_code/
+if parent_dir not in sys.path:
+    sys.path.append(parent_dir)
 
-# --- 物理目录严格对齐架构图 ---
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(BASE_DIR)
-REFERENCE_DIR = os.path.join(PROJECT_ROOT, "reference_novels")
-STYLE_DIR = os.path.join(PROJECT_ROOT, "text_style_imitation")
-PROJ_DIR = os.path.join(PROJECT_ROOT, "novel_projects")
+# =====================================================================
+# 2. 导入 core 模块 (注意加 core. 前缀)
+# =====================================================================
+from core._core_config import BASE_DIR, PROJECT_ROOT, REFERENCE_DIR, STYLE_DIR, PROJ_DIR
+from core._core_utils import smart_read_text
+from core._core_llm import call_deepseek_api
 
 class StyleAnalysisApp:
     def __init__(self, root):
@@ -28,21 +30,18 @@ class StyleAnalysisApp:
     def create_widgets(self):
         padding = {'padx': 10, 'pady': 8}
 
-        # 1. 原文路径选择
         frame_original = ttk.LabelFrame(self.root, text="1. 选择参考小说原文 (.txt)")
         frame_original.pack(fill="x", **padding)
         self.original_var = tk.StringVar()
         ttk.Entry(frame_original, textvariable=self.original_var, state="readonly", width=55).grid(row=0, column=0, padx=5, pady=10)
         ttk.Button(frame_original, text="浏览...", command=self.select_original).grid(row=0, column=1, padx=5, pady=10)
 
-        # 2. 模型选择
         frame_model = ttk.LabelFrame(self.root, text="2. 选择处理模型")
         frame_model.pack(fill="x", **padding)
         self.model_var = tk.StringVar(value="deepseek-chat")
         ttk.Radiobutton(frame_model, text="DeepSeek V3 (标准)", variable=self.model_var, value="deepseek-chat").pack(side=tk.LEFT, padx=10, pady=5)
         ttk.Radiobutton(frame_model, text="DeepSeek R1 (推理)", variable=self.model_var, value="deepseek-reasoner").pack(side=tk.LEFT, padx=10, pady=5)
 
-        # 3. 执行按钮与日志面板
         self.btn_process = ttk.Button(self.root, text="▶ 开始提取文风特征", command=self.start_process_thread)
         self.btn_process.pack(pady=10)
 
@@ -81,32 +80,24 @@ class StyleAnalysisApp:
     def execute_analysis(original_path, model, log_func, project_name=None):
         novel_name = os.path.splitext(os.path.basename(original_path))[0]
         try:
-            try:
-                with open(original_path, 'r', encoding='utf-8') as f:
-                    original_text = f.read(50000)
-            except UnicodeDecodeError:
-                with open(original_path, 'r', encoding='gbk') as f:
-                    original_text = f.read(50000)
+            original_text = smart_read_text(original_path, max_len=50000)
         except Exception as e:
             log_func(f"读取文件失败: {e}")
             return False
 
         try:
-            # --- 动态目录映射，严格统一文件名为 features.md ---
+            style_dir = os.path.join(STYLE_DIR, f"{novel_name}_style_imitation")
+            os.makedirs(style_dir, exist_ok=True)
+            save_path = os.path.join(style_dir, "features.md")
+            
+            project_save_path = None
             if project_name:
-                target_dir = os.path.join(PROJ_DIR, project_name)
-                os.makedirs(target_dir, exist_ok=True)
-                save_path = os.path.join(target_dir, "features.md")
-            else:
-                target_dir = os.path.join(STYLE_DIR, f"{novel_name}_style_imitation")
-                os.makedirs(target_dir, exist_ok=True)
-                save_path = os.path.join(target_dir, "features.md")
+                project_dir = os.path.join(PROJ_DIR, project_name)
+                os.makedirs(project_dir, exist_ok=True)
+                project_save_path = os.path.join(project_dir, "features.md")
 
             log_func("正在请求 API 进行文风特征动态分析...")
             
-            # =========================================================================
-            # 提示词部分一：发送给 AI 进行动态特征提取
-            # =========================================================================
             prompt_header = """使用严谨客观的语言，按照以下格式总结该小说的行文特点，不要包含具体的剧情内容和人物名字，允许分类讨论，比如...：在...时...；在...时...。在有标注“举例”的项目里要附上若干示例。
 一、行文风格
 叙事节奏：推进故事发展或展现事件细节的速度等分类：快节奏（动作冲突密集）/慢节奏（侧重心理与环境铺垫）/快慢交替/延宕（在关键节点故意放缓拉扯）等
@@ -133,9 +124,6 @@ class StyleAnalysisApp:
 """
             prompt_part_1 = prompt_header + original_text
 
-            # =========================================================================
-            # 提示词部分二：静态禁止事项约束（在 AI 返回后拼接）
-            # =========================================================================
             prompt_part_2 = """五、禁止事项
 1.比较定义（是否出现以下句式）：
 “与其说……不如说……”
@@ -163,34 +151,21 @@ class StyleAnalysisApp:
 绝对禁止：破布娃娃（及人偶、偶人、木偶、断了线的木偶、布娃娃、娃娃等）、濒死的/被抛上岸/砧板上鱼、像一盆冰水、像一把重锤、淬了毒的...、飓风、被抽去骨头的...、祭品、待宰的...、牲畜、最锋利的冰锥、离了水的鱼、重型卡车、灵魂出窍、空白/空白的大脑、行驶的列车/火车、虔诚的...、撞击、山崩地裂、火山爆发、龙卷风、洪流、子弹、炮弹、燎原的火、掠夺、信徒、攻城锤、岩浆、海藻、破碎（形容声音或身体）。
 尽量避免：火星、洪流、毒蛇、小船、催化剂、催情药、小兽、烟花、爆炸、船桨、划船、攻城略地、开疆拓土、机器/机械的、溺水、容器、每一个毛孔都在叫嚣、五脏六腑都错了位、毒刺、羽毛、拉风箱。"""
 
-            api_key = os.getenv("DEEPSEEK_API_KEY")
-            if not api_key:
-                log_func("error: 未能在环境变量中找到 DEEPSEEK_API_KEY")
-                return False
-
-            headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
-            payload = {
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": "你是一个严谨的文本分析程序。请严格按照要求输出 Markdown 格式的纯文本，不要包含任何多余的寒暄。"},
-                    {"role": "user", "content": prompt_part_1}
-                ],
-                "temperature": 0.3 # 降低随机性
-            }
+            # 【优化2】：直接调用封装好的 core_llm 函数，不需要写 headers、payload、容错解析等
+            sys_prompt = "你是一个严谨的文本分析程序。请严格按照要求输出 Markdown 格式的纯文本，不要包含任何多余的寒暄。"
+            analysis_result = call_deepseek_api(system_prompt=sys_prompt, user_prompt=prompt_part_1, model=model, temperature=0.3)
             
-            response = requests.post("https://api.deepseek.com/chat/completions", headers=headers, json=payload, timeout=180)
-            response.raise_for_status()
-            
-            # 获取 AI 生成的“部分一”结果
-            analysis_result = response.json()['choices'][0]['message']['content'].strip()
-            
-            # 将生成的“部分一”与静态的“部分二”进行物理拼接
             final_output = f"{analysis_result}\n\n{prompt_part_2}"
             
             with open(save_path, 'w', encoding='utf-8') as f:
                 f.write(final_output)
             
-            log_func(f"✅ 分析与拼接完成！最终设定文件已落盘至: {save_path}")
+            msg = f"✅ 分析与拼接完成！最终设定文件已落盘至: {save_path}"
+            if project_save_path:
+                shutil.copy2(save_path, project_save_path)
+                msg += f"\n已同步备份至项目目录: {project_save_path}"
+                
+            log_func(msg)
             return True
 
         except Exception as e:
@@ -200,7 +175,7 @@ class StyleAnalysisApp:
             return False
 
 def run_headless(target_file, project_name=None, model="deepseek-chat"):
-    """供后端 API 调用的后台静默执行入口"""
+    import sys
     def safe_log(msg):
         try:
             print(msg)
@@ -208,7 +183,7 @@ def run_headless(target_file, project_name=None, model="deepseek-chat"):
             try:
                 sys.stdout.buffer.write((msg + "\n").encode('utf-8'))
             except Exception:
-                print(msg.encode('gbk', 'replace').decode('gbk'))
+                pass
 
     if os.path.isabs(target_file):
         original_path = target_file
@@ -227,6 +202,7 @@ def run_headless(target_file, project_name=None, model="deepseek-chat"):
         sys.exit(1)
 
 if __name__ == "__main__":
+    import sys
     parser = argparse.ArgumentParser(description="大模型深层文风特征提取")
     parser.add_argument("--target_file", type=str, help="参考小说原文的绝对路径或文件名", default="")
     parser.add_argument("--project", type=str, help="绑定的项目名称", default="")
@@ -235,6 +211,8 @@ if __name__ == "__main__":
     args, unknown = parser.parse_known_args()
     
     if not args.target_file and len(sys.argv) == 1:
+        import tkinter as tk
+        from tkinter import ttk, filedialog, messagebox
         root = tk.Tk()
         app = StyleAnalysisApp(root)
         root.mainloop()

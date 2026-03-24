@@ -1,23 +1,23 @@
-import sys
-import argparse
 import os
 import json
-import requests
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+import argparse
 import threading
-from dotenv import load_dotenv
 
-# 【关键配置】：强制设置 HuggingFace 国内镜像源环境
-os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-load_dotenv()
+# =====================================================================
+# 1. 跨目录寻址：将父目录(style_imitation_code)加入环境变量
+# =====================================================================
+import sys
+current_dir = os.path.dirname(os.path.abspath(__file__)) # 指向 scripts/
+parent_dir = os.path.dirname(current_dir)                # 指向 style_imitation_code/
+if parent_dir not in sys.path:
+    sys.path.append(parent_dir)
 
-# --- 物理目录对齐 ---
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(BASE_DIR)
-REFERENCE_DIR = os.path.join(PROJECT_ROOT, "reference_novels")
-STYLE_DIR = os.path.join(PROJECT_ROOT, "text_style_imitation")
-PROJ_DIR = os.path.join(PROJECT_ROOT, "novel_projects")
+# =====================================================================
+# 2. 导入 core 模块 (注意加 core. 前缀)
+# =====================================================================
+from core._core_config import BASE_DIR, PROJECT_ROOT, REFERENCE_DIR, STYLE_DIR, PROJ_DIR
+from core._core_llm import call_deepseek_api
+from core._core_rag import RAGRetriever
 
 class SettingCompletionApp:
     def __init__(self, root):
@@ -26,14 +26,12 @@ class SettingCompletionApp:
         self.root.geometry("750x650")
         self.root.resizable(False, False)
         
-        # 变量存储
         self.original_var = tk.StringVar()
         self.model_var = tk.StringVar(value="deepseek-chat")
         
         self.create_widgets()
 
     def create_widgets(self):
-        # 顶部基础配置
         top_frame = ttk.Frame(self.root)
         top_frame.pack(fill="x", padx=10, pady=5)
         
@@ -44,14 +42,12 @@ class SettingCompletionApp:
         ttk.Label(top_frame, text="处理模型:").grid(row=1, column=0, sticky="w", pady=5)
         ttk.Radiobutton(top_frame, text="DeepSeek V3", variable=self.model_var, value="deepseek-chat").grid(row=1, column=1, sticky="w")
 
-        # 选项卡
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill="both", expand=True, padx=10, pady=5)
         
         self.build_worldview_tab()
         self.build_character_tab()
 
-        # 日志输出
         self.log_text = tk.Text(self.root, height=6, state="disabled", bg="#f8f9fa")
         self.log_text.pack(fill="x", padx=10, pady=5)
         self.log("系统就绪。请选择补全模式并填写必要信息。")
@@ -82,7 +78,6 @@ class SettingCompletionApp:
         self.notebook.add(frame, text="角色卡补全")
         
         self.char_vars = {}
-        # 基础属性
         ttk.Label(frame, text="目标角色名:").grid(row=0, column=0, sticky="w", padx=10, pady=2)
         self.char_vars["name"] = tk.StringVar()
         ttk.Entry(frame, textvariable=self.char_vars["name"], width=20).grid(row=0, column=1, sticky="w", pady=2)
@@ -95,7 +90,6 @@ class SettingCompletionApp:
         self.char_vars["char_shape"] = tk.StringVar()
         ttk.Combobox(frame, textvariable=self.char_vars["char_shape"], values=["圆形人物", "扁平人物"], width=17).grid(row=2, column=1, sticky="w", pady=2)
 
-        # 相关信息 (至少2项)
         ttk.Label(frame, text="--- 二、相关信息 (至少填2项) ---", foreground="blue").grid(row=3, column=0, columnspan=2, sticky="w", padx=10, pady=5)
         sec2_fields = [("身份", "identity"), ("性格", "personality"), ("外貌等", "appearance"), ("能力特点/境界", "ability"), ("年龄与经历", "experience")]
         for i, (label, key) in enumerate(sec2_fields):
@@ -103,7 +97,6 @@ class SettingCompletionApp:
             self.char_vars[key] = tk.StringVar()
             ttk.Entry(frame, textvariable=self.char_vars[key], width=50).grid(row=4+i, column=1, sticky="w", pady=2)
             
-        # 态度 (至少1项)
         ttk.Label(frame, text="--- 四、对主要角色态度 (至少填1项) ---", foreground="blue").grid(row=9, column=0, columnspan=2, sticky="w", padx=10, pady=5)
         ttk.Label(frame, text="态度输入:").grid(row=10, column=0, sticky="w", padx=20, pady=2)
         self.char_vars["attitude"] = tk.StringVar()
@@ -124,7 +117,6 @@ class SettingCompletionApp:
         if path: self.original_var.set(path)
 
     def start_process(self, mode):
-        # 1. 验证逻辑
         data_to_pass = {}
         if mode == "worldview":
             if not self.wv_vars["worldview"].get().strip():
@@ -154,28 +146,67 @@ class SettingCompletionApp:
 
     @staticmethod
     def execute_completion(original_path, mode, json_data, model, log_func, project_name=None):
-        log_func(f"正在进行【{mode}】模式设定补全...")
+        log_func(f"正在进行【{mode}】模式设定补全 (RAG 加速版)...")
         
-        # 确定目标目录
         target_dir = PROJ_DIR
         if project_name:
             target_dir = os.path.join(PROJ_DIR, project_name)
             os.makedirs(target_dir, exist_ok=True)
 
-        original_text = ""
-        if original_path and os.path.exists(original_path):
-            try:
-                try:
-                    with open(original_path, 'r', encoding='utf-8') as f:
-                        original_text = f.read(20000) # 提供两万字上下文参考
-                except UnicodeDecodeError:
-                    with open(original_path, 'r', encoding='gbk') as f:
-                        original_text = f.read(20000)
-            except Exception as e:
-                log_func(f"读取文件失败: {e}")
-                return False
+        if not original_path:
+             log_func("❌ 错误：未提供参考原文路径，无法定位 RAG 索引。")
+             return False
+             
+        novel_name = os.path.splitext(os.path.basename(original_path))[0]
+        style_dir = os.path.join(STYLE_DIR, f"{novel_name}_style_imitation")
+        rag_db_dir = os.path.join(style_dir, "global_rag_db")
+        
+        # [修复BUG] 对齐 f0 生成的文件名
+        index_path = os.path.join(rag_db_dir, "vector.index")
+        chunks_path = os.path.join(rag_db_dir, "chunks.json")
 
-        # 构建 Prompt
+        if not os.path.exists(index_path) or not os.path.exists(chunks_path):
+             log_func("❌ 致命错误：未找到全局 RAG 索引。请先执行 f0 初始化！")
+             return False
+
+        log_func("正在加载全局 RAG 索引...")
+        try:
+            retriever = RAGRetriever()
+            index, chunks = retriever.load_index(index_path, chunks_path)
+            log_func(f"已加载索引，包含 {len(chunks)} 个文本块。")
+        except Exception as e:
+            log_func(f"❌ 索引加载失败: {str(e)}")
+            return False
+
+        queries = []
+        if mode == "worldview":
+            for key, value in json_data.items():
+                if value and str(value).strip():
+                     queries.append(str(value).strip())
+            queries.extend(["世界观", "力量体系", "境界", "宗门", "历史", "传说", "地图", "势力"])
+            
+        elif mode == "character":
+            char_name = json_data.get("name", "")
+            if char_name:
+                queries.append(char_name)
+                queries.extend([
+                    f"{char_name} 外貌", f"{char_name} 性格", f"{char_name} 身份", 
+                    f"{char_name} 说话", f"{char_name} 战斗", f"{char_name} 经历"
+                ])
+            for key, value in json_data.items():
+                if value and str(value).strip() and key != "name":
+                    queries.append(str(value).strip())
+
+        log_func(f"正在基于 {len(queries)} 个关键信息点进行 RAG 检索...")
+        try:
+            retrieved_chunks = retriever.search(index, chunks, queries, k=5, batch_size=5)
+            context_text = "\n...\n".join(retrieved_chunks[:40]) 
+            log_func(f"成功召回 {min(len(retrieved_chunks), 40)} 个高相关度片段。")
+            
+        except Exception as e:
+            log_func(f"❌ RAG 检索失败: {str(e)}")
+            return False
+
         if mode == "worldview":
             save_path = os.path.join(target_dir, "world_settings.md")
             prompt_header = """【系统指令】：
@@ -185,7 +216,7 @@ class SettingCompletionApp:
 
 【用户已提供的设定】：
 """
-            prompt = prompt_header + json.dumps(json_data, ensure_ascii=False, indent=2) + "\n\n【参考原文片段】：\n" + original_text
+            prompt = prompt_header + json.dumps(json_data, ensure_ascii=False, indent=2) + "\n\n【参考原文片段 (RAG 检索)】：\n" + context_text
 
         elif mode == "character":
             char_name = json_data.get("name", "未知角色")
@@ -198,35 +229,22 @@ class SettingCompletionApp:
 
 【用户已提供的部分设定】：
 """
-            prompt = prompt_header + json.dumps(json_data, ensure_ascii=False, indent=2) + "\n\n【参考原文片段】：\n" + original_text
+            prompt = prompt_header + json.dumps(json_data, ensure_ascii=False, indent=2) + "\n\n【参考原文片段 (RAG 检索)】：\n" + context_text
 
-        api_key = os.getenv("DEEPSEEK_API_KEY")
-        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
-        payload = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": "你是一个严谨的设定补全专家。只允许输出 Markdown 格式的纯文本。"},
-                {"role": "user", "content": prompt}
-            ],
-            "temperature": 0.4
-        }
-        
+        sys_prompt = "你是一个严谨的设定补全专家。只允许输出 Markdown 格式的纯文本。"
+
         try:
-            response = requests.post("https://api.deepseek.com/chat/completions", headers=headers, json=payload, timeout=180)
-            response.raise_for_status()
-            result_text = response.json()['choices'][0]['message']['content'].strip()
-            
+            result_text = call_deepseek_api(system_prompt=sys_prompt, user_prompt=prompt, model=model, temperature=0.4)
             with open(save_path, 'w', encoding='utf-8') as f:
                 f.write(result_text)
             log_func(f"✅ 补全完成！文件落盘至: {save_path}")
             return True
         except Exception as e:
             log_func(f"❌ API 调用失败: {str(e)}")
-            import traceback
-            traceback.print_exc()
             return False
 
 def run_headless(target_file, mode, json_string, project_name=None, model="deepseek-chat"):
+    import sys
     try:
         json_data = json.loads(json_string)
     except json.JSONDecodeError:
@@ -238,6 +256,7 @@ def run_headless(target_file, mode, json_string, project_name=None, model="deeps
     if not success: sys.exit(1)
 
 if __name__ == "__main__":
+    import sys
     parser = argparse.ArgumentParser()
     parser.add_argument("--target_file", type=str, default="")
     parser.add_argument("--mode", type=str, help="worldview 或 character", default="")
@@ -247,6 +266,8 @@ if __name__ == "__main__":
     args, unknown = parser.parse_known_args()
     
     if not args.mode and len(sys.argv) == 1:
+        import tkinter as tk
+        from tkinter import ttk, filedialog, messagebox
         root = tk.Tk()
         app = SettingCompletionApp(root)
         root.mainloop()

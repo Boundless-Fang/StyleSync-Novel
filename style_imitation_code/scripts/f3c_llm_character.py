@@ -1,28 +1,27 @@
-import sys
-import argparse
 import os
-
-# 【关键配置】：强制设置 HuggingFace 国内镜像源环境
-os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-
-import requests
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, simpledialog
-import threading
-from dotenv import load_dotenv
-import numpy as np
-import faiss
-from sentence_transformers import SentenceTransformer
 import re
+import json
+import argparse
+import threading
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
 
-load_dotenv()
+# =====================================================================
+# 1. 跨目录寻址：将父目录(style_imitation_code)加入环境变量
+# =====================================================================
+import sys
+current_dir = os.path.dirname(os.path.abspath(__file__)) # 指向 scripts/
+parent_dir = os.path.dirname(current_dir)                # 指向 style_imitation_code/
+if parent_dir not in sys.path:
+    sys.path.append(parent_dir)
 
-# --- 物理目录对齐 ---
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(BASE_DIR)
-REFERENCE_DIR = os.path.join(PROJECT_ROOT, "reference_novels")
-STYLE_DIR = os.path.join(PROJECT_ROOT, "text_style_imitation")
-PROJ_DIR = os.path.join(PROJECT_ROOT, "novel_projects")
+# =====================================================================
+# 2. 导入 core 模块 (注意加 core. 前缀)
+# =====================================================================
+from core._core_config import BASE_DIR, PROJECT_ROOT, REFERENCE_DIR, STYLE_DIR, PROJ_DIR
+from core._core_utils import smart_read_text
+from core._core_llm import call_deepseek_api
+from core._core_rag import RAGRetriever
 
 class CharacterProfileApp:
     def __init__(self, root):
@@ -89,21 +88,7 @@ class CharacterProfileApp:
         self.btn_process.config(state="normal")
 
     @staticmethod
-    def chunk_text(text, max_len=600):
-        paragraphs = [p.strip() for p in text.split('\n') if p.strip()]
-        chunks, current_chunk = [], ""
-        for p in paragraphs:
-            if len(current_chunk) + len(p) <= max_len:
-                current_chunk += p + "\n"
-            else:
-                if current_chunk: chunks.append(current_chunk.strip())
-                current_chunk = p + "\n"
-        if current_chunk: chunks.append(current_chunk.strip())
-        return chunks
-
-    @staticmethod
     def parse_character_names(char_input):
-        """解析如 '张小凡(鬼厉, 小凡)' 的字符串，提取主名和别名"""
         char_input = char_input.replace('（', '(').replace('）', ')')
         if '(' in char_input and char_input.endswith(')'):
             main_name = char_input.split('(')[0].strip()
@@ -118,41 +103,31 @@ class CharacterProfileApp:
             novel_name = os.path.splitext(os.path.basename(original_path))[0]
             main_name, search_keywords = CharacterProfileApp.parse_character_names(character_input)
             
-            # 确定读取与落盘的物理路径
-            if project_name:
-                target_dir = os.path.join(PROJ_DIR, project_name, "character_profiles")
-            else:
-                target_dir = os.path.join(STYLE_DIR, f"{novel_name}_style_imitation", "character_profiles")
-            os.makedirs(target_dir, exist_ok=True)
+            style_dir = os.path.join(STYLE_DIR, f"{novel_name}_style_imitation")
+            rag_db_dir = os.path.join(style_dir, "global_rag_db")
+            index_path = os.path.join(rag_db_dir, "vector.index")
+            chunks_path = os.path.join(rag_db_dir, "chunks.json")
+
+            if not os.path.exists(index_path) or not os.path.exists(chunks_path):
+                 log_func("❌ 致命错误：未找到全局 RAG 索引。请先执行 f0 初始化！")
+                 return False
+
+            style_char_dir = os.path.join(style_dir, "character_profiles")
+            os.makedirs(style_char_dir, exist_ok=True)
+            save_path = os.path.join(style_char_dir, f"{main_name}.md")
             
-            # 角色卡文件命名
-            save_path = os.path.join(target_dir, f"{main_name}.md")
+            project_save_path = None
+            if project_name:
+                project_dir = os.path.join(PROJ_DIR, project_name, "character_profiles")
+                os.makedirs(project_dir, exist_ok=True)
+                project_save_path = os.path.join(project_dir, f"{main_name}.md")
 
+            log_func(f"正在加载全局 RAG 索引并定向追踪角色: {search_keywords}")
             try:
-                try:
-                    with open(original_path, 'r', encoding='utf-8') as f:
-                        full_text = f.read()
-                except UnicodeDecodeError:
-                    with open(original_path, 'r', encoding='gbk') as f:
-                        full_text = f.read()
-            except Exception as e:
-                log_func(f"读取文件失败: {e}")
-                return False
-
-            # 2. 文本分块与向量化 (定向 RAG 核心逻辑)
-            log_func(f"正在全量向量化，并定向追踪角色: {search_keywords}")
-            try:
-                embedder = SentenceTransformer('shibing624/text2vec-base-chinese')
-                chunks = CharacterProfileApp.chunk_text(full_text)
-                chunk_embeddings = embedder.encode(chunks, show_progress_bar=False)
+                retriever = RAGRetriever()
+                index, chunks = retriever.load_index(index_path, chunks_path)
+                log_func(f"已加载索引，包含 {len(chunks)} 个文本块。")
                 
-                dimension = chunk_embeddings.shape[1]
-                index = faiss.IndexFlatL2(dimension)
-                index.add(np.array(chunk_embeddings).astype('float32'))
-                
-                retrieved_chunks = set()
-                
-                # 强化检索维度：除了名字，加上外貌、战斗、身世等诱导词强行抓取特征
                 meta_queries = [
                     f"{main_name} 外貌 气质 衣服 长相",
                     f"{main_name} 境界 功法 武器 战斗",
@@ -161,22 +136,14 @@ class CharacterProfileApp:
                 ]
                 all_queries = search_keywords + meta_queries
                 
-                for i in range(0, len(all_queries), 3):
-                    batch_queries = [" ".join(all_queries[i:i+3])]
-                    query_vec = embedder.encode(batch_queries)
-                    distances, indices = index.search(np.array(query_vec).astype('float32'), k=8) 
-                    for idx in indices[0]:
-                        if idx != -1:
-                            retrieved_chunks.add(chunks[idx])
-                
-                context_text = "\n...\n".join(list(retrieved_chunks)[:50]) # 给定足够的上下文碎片
-                log_func(f"成功召回 {len(retrieved_chunks)} 个包含该角色的高相关度片段。")
+                retrieved_chunks = retriever.search(index, chunks, all_queries, k=8, batch_size=3)
+                context_text = "\n...\n".join(retrieved_chunks[:50]) 
+                log_func(f"成功召回 {min(len(retrieved_chunks), 50)} 个包含该角色的高相关度片段。")
                 
             except Exception as e:
                 log_func(f"❌ 向量化或检索失败: {str(e)}")
                 return False
 
-            # 4. 请求大语言模型构建角色卡
             log_func("正在调用大模型重组角色信息卡...")
             prompt_header = f"""【系统指令】：
 请基于提供的“文本高相关度片段”，为角色【{character_input}】提取并总结信息卡片。
@@ -214,26 +181,21 @@ class CharacterProfileApp:
 【文本高相关度片段 (经 RAG 检索提取)】：
 """
             prompt = prompt_header + context_text
+            sys_prompt = "你是一个严谨的小说设定整理专家。严格遵守原著，空缺项目填未知，只输出 Markdown。"
 
-            api_key = os.getenv("DEEPSEEK_API_KEY")
-            headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
-            payload = {
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": "你是一个严谨的小说设定整理专家。严格遵守原著，空缺项目填未知，只输出 Markdown。"},
-                    {"role": "user", "content": prompt}
-                ],
-                "temperature": 0.2
-            }
-            
             try:
-                response = requests.post("https://api.deepseek.com/chat/completions", headers=headers, json=payload, timeout=180)
-                response.raise_for_status()
-                result_text = response.json()['choices'][0]['message']['content'].strip()
+                result_text = call_deepseek_api(system_prompt=sys_prompt, user_prompt=prompt, model=model, temperature=0.2)
                 
                 with open(save_path, 'w', encoding='utf-8') as f:
                     f.write(result_text)
-                log_func(f"✅ 角色卡构建完成！文件落盘至: {save_path}")
+                    
+                msg = f"✅ 角色卡构建完成！文件落盘至: {save_path}"
+                if project_save_path:
+                    import shutil
+                    shutil.copy2(save_path, project_save_path)
+                    msg += f"\n已同步备份至项目目录: {project_save_path}"
+                    
+                log_func(msg)
                 return True
             except Exception as e:
                 log_func(f"❌ API 调用失败: {str(e)}")
@@ -245,6 +207,7 @@ class CharacterProfileApp:
             return False
 
 def run_headless(target_file, character_name, project_name=None, model="deepseek-chat"):
+    import sys
     if os.path.isabs(target_file):
         original_path = target_file
     else:
@@ -259,19 +222,21 @@ def run_headless(target_file, character_name, project_name=None, model="deepseek
     if not success: sys.exit(1)
 
 if __name__ == "__main__":
+    import sys
     parser = argparse.ArgumentParser()
     parser.add_argument("--target_file", type=str, default="")
-    parser.add_argument("--character", type=str, default="") # 新增的角色参数
+    parser.add_argument("--character", type=str, default="") 
     parser.add_argument("--project", type=str, default="")
     parser.add_argument("--model", type=str, default="deepseek-chat")
     args, unknown = parser.parse_known_args()
     
     if not args.target_file and len(sys.argv) == 1:
+        import tkinter as tk
+        from tkinter import ttk, filedialog, messagebox
         root = tk.Tk()
         app = CharacterProfileApp(root)
         root.mainloop()
     else:
-        # 如果是静默调用但缺少角色参数，安全退出
         if not args.character:
             print("error: 必须提供 --character 参数")
             sys.exit(1)
