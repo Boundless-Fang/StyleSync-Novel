@@ -1,9 +1,13 @@
 import os
+import re  # 导入正则表达式模块用于清洗中文
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 # 默认路径
 DEFAULT_PATH = r"D:\StyleSync-Novel\style_imitation_code"
+
+# --- 定义允许合并的文件后缀名（支持原有的 .py 以及前端文件） ---
+ALLOWED_EXTENSIONS = ('.py', '.js', '.html', '.css')
 
 class CodeMergerApp:
     def __init__(self, root):
@@ -57,6 +61,10 @@ class CodeMergerApp:
         bottom_frame.pack(fill="x", pady=15)
 
         tk.Button(bottom_frame, text="全选 / 取消全选", command=self.toggle_all).pack(side="left", padx=10)
+        
+        # --- 清除中文的复选框 ---
+        self.remove_cn_var = tk.BooleanVar(value=False) # 默认不清除
+        tk.Checkbutton(bottom_frame, text="🧹 清洗所有中文", variable=self.remove_cn_var, font=("微软雅黑", 9)).pack(side="left", padx=10)
         
         self.copy_btn = tk.Button(bottom_frame, text="⚡ 一键合并并复制 ⚡", 
                                   command=self.merge_and_copy, 
@@ -121,7 +129,7 @@ class CodeMergerApp:
         try:
             # 1. 先处理“根目录下的文件” (如果勾选了)
             if "[根目录下的文件]" in selected_folders:
-                files = sorted([f for f in os.listdir(root_path) if f.endswith('.py') and os.path.isfile(os.path.join(root_path, f))])
+                files = sorted([f for f in os.listdir(root_path) if f.endswith(ALLOWED_EXTENSIONS) and os.path.isfile(os.path.join(root_path, f))])
                 if files:
                     combined_text.append(f"\n{'='*60}\n# 位置: 项目根目录\n{'='*60}\n")
                     for f_name in files:
@@ -135,13 +143,13 @@ class CodeMergerApp:
                 if folder_name == "[根目录下的文件]": continue
                 
                 folder_full_path = os.path.join(root_path, folder_name)
-                # 递归读取该文件夹下的所有 .py
+                # 递归读取该文件夹下的所有目标文件
                 for root, dirs, files in os.walk(folder_full_path):
-                    py_files = sorted([f for f in files if f.endswith('.py')])
-                    if py_files:
+                    target_files = sorted([f for f in files if f.endswith(ALLOWED_EXTENSIONS)])
+                    if target_files:
                         rel_path = os.path.relpath(root, root_path)
                         combined_text.append(f"\n\n{'#'*60}\n# 目录: {rel_path}\n{'#'*60}\n")
-                        for f_name in py_files:
+                        for f_name in target_files:
                             with open(os.path.join(root, f_name), 'r', encoding='utf-8') as f:
                                 combined_text.append(f"\n# --- File: {f_name} ---")
                                 combined_text.append(f.read())
@@ -151,9 +159,17 @@ class CodeMergerApp:
                 messagebox.showinfo("提示", "所选范围内没找到代码。")
                 return
 
+            # --- 文本处理逻辑 ---
+            final_text = "\n".join(combined_text)
+            
+            if self.remove_cn_var.get():
+                # 匹配所有中文字符 (汉字) 并替换为空
+                # 如果你想连中文标点一起删掉，把下面这行换成：final_text = re.sub(r'[^\x00-\x7F]+', '', final_text)
+                final_text = re.sub(r'[\u4e00-\u9fa5]', '', final_text)
+
             # 复制到剪贴板
             self.root.clipboard_clear()
-            self.root.clipboard_append("\n".join(combined_text))
+            self.root.clipboard_append(final_text)
             messagebox.showinfo("成功", f"整合完毕！共 {file_count} 个文件已存入剪贴板。")
 
         except Exception as e:

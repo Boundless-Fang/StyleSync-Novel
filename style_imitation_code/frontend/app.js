@@ -78,6 +78,96 @@ createApp({
         const workflowStyleScript = ref('f1a');
         const workflowStyleModel = ref('deepseek-chat');
 
+        // ================= f3c 角色选择器面板专属变量 ================= 
+        const recommendedChars = ref([]);
+        const freqChars = ref([]);
+        const customCharInput = ref('');
+        const showCharSelector = ref(false);
+        const isLoadingChars = ref(false);
+
+        // 获取并解析推荐角色与词频 
+        const loadCharacterSuggestions = async () => {
+            if (!selectedReference.value) {
+                alert("请先在上方选择参考书！");
+                return;
+            }
+            isLoadingChars.value = true;
+            showCharSelector.value = true;
+            recommendedChars.value = [];
+            freqChars.value = [];
+
+            const styleName = selectedReference.value.replace(/\.txt$/i, '') + '_style_imitation';
+            // 利用路径穿越特性，跨目录读取 style_imitation 的数据 
+            const fakeProjName = encodeURIComponent('../text_style_imitation/' + styleName);
+
+            try {
+                // 1. 读取 f3b 生成的世界观，提取推荐角色 
+                const wsRes = await fetch(`/api/projects/${fakeProjName}/settings/world_settings.md`);
+                if (wsRes.ok) {
+                    const wsData = await wsRes.json();
+                    const match = (wsData.content || "").match(/角色[：:]\s*(.*)/);
+                    if (match && match[1]) {
+                        const rawChars = match[1].split(/[,，、]/).map(c => c.trim()).filter(Boolean);
+                        rawChars.forEach(c => {
+                            let name = c;
+                            let aliases = '';
+                            const aliasMatch = c.match(/(.+?)[(（](.+?)[)）]/); // 解析 "萧炎(主角)" 
+                            if (aliasMatch) {
+                                name = aliasMatch[1].trim();
+                                aliases = aliasMatch[2].trim();
+                            }
+                            if (!recommendedChars.value.find(rc => rc.name === name)) {
+                                recommendedChars.value.push({ name, aliases, selected: true, editing: false });
+                            }
+                        });
+                    }
+                }
+
+                // 2. 读取 f2a 生成的词频，提取备选名单 
+                const freqRes = await fetch(`/api/projects/${fakeProjName}/settings/statistics/词频统计.txt`);
+                if (freqRes.ok) {
+                    const freqData = await freqRes.json();
+                    const matches = [...(freqData.content || "").matchAll(/(\S+)\((\d+)\)/g)];
+                    let count = 0;
+                    for (const m of matches) {
+                        const word = m[1];
+                        const freq = parseInt(m[2]);
+                        // 过滤掉标点、单字，以及已经出现在推荐名单中的词 
+                        if (word.length >= 2 && !recommendedChars.value.find(rc => rc.name === word)) {
+                            freqChars.value.push({ name: word, freq, selected: false });
+                            count++;
+                        }
+                        if (count >= 40) break; // 最多展示 40 个高频词供勾选 
+                    }
+                }
+            } catch (e) {
+                console.error("加载角色失败", e);
+                alert("获取推荐失败。请确保该参考书已经运行过 f1a (词频) 和 f3b (世界观)。");
+            } finally {
+                isLoadingChars.value = false;
+            }
+        };
+
+        // 监听面板变动，自动拼接并同步给后端的 workflowCharName 
+        const syncCharSelection = () => {
+            const chars = [];
+            recommendedChars.value.filter(c => c.selected).forEach(c => {
+                chars.push(c.aliases ? `${c.name}(${c.aliases})` : c.name);
+            });
+            freqChars.value.filter(c => c.selected).forEach(c => {
+                chars.push(c.name);
+            });
+            if (customCharInput.value.trim()) {
+                const customs = customCharInput.value.split(/[,，]/).map(c => c.trim()).filter(Boolean);
+                chars.push(...customs);
+            }
+            workflowCharName.value = chars.join(', ');
+        };
+
+        // 深度监听这三个变量，任意改动都会重算最终文本 
+        watch([recommendedChars, freqChars, customCharInput], syncCharSelection, { deep: true });
+        // ============================================================== 
+
         const workflowCharName = ref('');
         const workflowCharSelect = ref('');
         const workflowChapterName = ref('');
@@ -674,6 +764,9 @@ createApp({
             workflowProjectModel, workflowStyleModel, workflowProjectScript, workflowStyleScript, newProjectBranch, newProjectReferenceStyle, availableStyles,
             workflowChapterName, workflowChapterSelect, workflowChapterBrief, workflowF4aMode, workflowF4aInput, projectCharacters, workflowCharSelect, f4aChar, f4aWorldview,
             fileInput, uploadFileName, handleFileUpload, submitUpload, loadReferences,
+            
+            // 暴露 f3c 角色面板变量
+            recommendedChars, freqChars, customCharInput, showCharSelector, isLoadingChars, loadCharacterSuggestions,
             
             // 导出一键流水线绑定的变量和方法
             styleExtractMode, autoPipelineType, autoStyleCharNames, isAutoRunning, autoRunProgress, runStyleScriptAuto

@@ -13,12 +13,20 @@ os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 load_dotenv()
 
 # 3. 物理目录架构对齐
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# 当前文件位于: D:\StyleSync-Novel\core\_core_config.py
+BASE_DIR = os.path.dirname(os.path.abspath(__file__)) # 指向 core/ 目录
 
-# 向上退两级！回到 D:\StyleSync-Novel
-PROJECT_ROOT = os.path.dirname(os.path.dirname(BASE_DIR))
+# 向上退一级！回到 D:\StyleSync-Novel
+PROJECT_ROOT = os.path.dirname(BASE_DIR)
 
-# 这样拼接出来的路径就全对了
+# 4. 映射实际物理文件夹
+CODE_DIR = os.path.join(PROJECT_ROOT, "style_imitation_code")
 REFERENCE_DIR = os.path.join(PROJECT_ROOT, "reference_novels")
 STYLE_DIR = os.path.join(PROJECT_ROOT, "text_style_imitation")
 PROJ_DIR = os.path.join(PROJECT_ROOT, "novel_projects")
+DICT_DIR = os.path.join(PROJECT_ROOT, "dictionaries")
+TEST_DIR = os.path.join(PROJECT_ROOT, "text_testing_code")
+
+# 5. 兜底检测与创建 (保持与 api 层一致性)
+for directory in [CODE_DIR, REFERENCE_DIR, STYLE_DIR, PROJ_DIR, DICT_DIR, TEST_DIR]:
+    os.makedirs(directory, exist_ok=True)
