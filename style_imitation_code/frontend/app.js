@@ -1,3 +1,4 @@
+// --- File: app.js ---
 const { createApp, ref, computed, watch, onMounted } = Vue;
 
 createApp({
@@ -37,12 +38,14 @@ createApp({
         const references = ref([]);
         const selectedReference = ref('');
         
-        // 新增：自动流水线模式参数
+        // 自动流水线模式参数
         const styleExtractMode = ref('auto');
         const autoPipelineType = ref('fanfic');
         const autoStyleCharNames = ref('');
         const isAutoRunning = ref(false);
         const autoRunProgress = ref('');
+        const isAutoPaused = ref(false); // 控制流水线中途暂停的布尔值
+        const cancelAutoFlag = ref(false); // 强制中断流水线的标志位
         
         // 文件上传响应式变量
         const fileInput = ref(null);
@@ -65,7 +68,7 @@ createApp({
         // 启动轮询
         setInterval(pollTasks, 2000);
 
-        const projectActionMode = ref('create'); // 新增：模式选择
+        const projectActionMode = ref('create'); // 模式选择
         const newProjectName = ref('');
         const existingProjectSelect = ref('');
         const newProjectBranch = ref('原创');
@@ -97,15 +100,15 @@ createApp({
             freqChars.value = [];
 
             const styleName = selectedReference.value.replace(/\.txt$/i, '') + '_style_imitation';
-            // 利用路径穿越特性，跨目录读取 style_imitation 的数据 
-            const fakeProjName = encodeURIComponent('../text_style_imitation/' + styleName);
+            const fakeProjName = encodeURIComponent('style@@' + styleName);
 
             try {
                 // 1. 读取 f3b 生成的世界观，提取推荐角色 
                 const wsRes = await fetch(`/api/projects/${fakeProjName}/settings/world_settings.md`);
                 if (wsRes.ok) {
                     const wsData = await wsRes.json();
-                    const match = (wsData.content || "").match(/角色[：:]\s*(.*)/);
+                    // 【唯一修改点】：增加了 .*? 以兼容 "出场角色以及别名：" 这种格式
+                    const match = (wsData.content || "").match(/角色.*?[：:]\s*(.*)/);
                     if (match && match[1]) {
                         const rawChars = match[1].split(/[,，、]/).map(c => c.trim()).filter(Boolean);
                         rawChars.forEach(c => {
@@ -123,8 +126,8 @@ createApp({
                     }
                 }
 
-                // 2. 读取 f2a 生成的词频，提取备选名单 
-                const freqRes = await fetch(`/api/projects/${fakeProjName}/settings/statistics/词频统计.txt`);
+                // 2. 读取 f2a 生成的词频，提取备选名单
+                const freqRes = await fetch(`/api/projects/${fakeProjName}/settings/statistics/高频词.txt`);
                 if (freqRes.ok) {
                     const freqData = await freqRes.json();
                     const matches = [...(freqData.content || "").matchAll(/(\S+)\((\d+)\)/g)];
@@ -142,7 +145,6 @@ createApp({
                 }
             } catch (e) {
                 console.error("加载角色失败", e);
-                alert("获取推荐失败。请确保该参考书已经运行过 f1a (词频) 和 f3b (世界观)。");
             } finally {
                 isLoadingChars.value = false;
             }
@@ -455,10 +457,24 @@ createApp({
             }
         };
         
-        // ============== 核心逻辑：一键自动文风提取流水线 ==============
+        // ============== 核心逻辑：一键自动文风提取流水线 (含断点与中断机制) ==============
+        
+        // 强制中断流水线
+        const stopAutoPipeline = () => {
+            if (isAutoRunning.value || isAutoPaused.value) {
+                cancelAutoFlag.value = true;
+                autoRunProgress.value = "正在强制终止流水线，等待当前步骤结束...";
+            }
+        };
+
         const waitForTask = (taskId) => {
             return new Promise((resolve, reject) => {
                 const check = async () => {
+                    // 如果触发了中断，截断等待
+                    if (cancelAutoFlag.value) {
+                        reject(new Error('用户手动终止了流水线'));
+                        return;
+                    }
                     try {
                         const res = await fetch(`/api/tasks/${taskId}`);
                         if (res.ok) {
@@ -481,16 +497,41 @@ createApp({
             });
         };
 
+        const executePipelineStep = async (step, customChar = null) => {
+            if (cancelAutoFlag.value) throw new Error("用户手动终止了流水线");
+
+            autoRunProgress.value = `${step.script} - ${step.name}`;
+            
+            // 对 URL 参数进行 encodeURIComponent 编码，避免文件名中包含特殊符号时请求被中断
+            let url = `/api/scripts/${step.script}?target_file=${encodeURIComponent(selectedReference.value)}`;
+            
+            if (['f1b', 'f2b', 'f3a', 'f3b', 'f3c'].includes(step.script)) {
+                url += `&model=${workflowStyleModel.value}`;
+            }
+            if (step.script === 'f3c' && customChar) {
+                url += `&character=${encodeURIComponent(customChar)}`;
+            }
+            
+            const res = await fetch(url, { method: 'POST' });
+            if (!res.ok) throw new Error(`${step.script} 请求失败`);
+            
+            const data = await res.json();
+            if (data.error) throw new Error(data.error);
+            
+            if (data.task_id) {
+                await waitForTask(data.task_id);
+            }
+            await pollTasks();
+        };
+
         const runStyleScriptAuto = async () => {
             if (!selectedReference.value) { alert("请先选择参考原著文件。"); return; }
             
-            // 解析输入的角色名列表 (兼容中英逗号)，如果留空则过滤后为空数组，直接跳过f3c
-            const chars = autoStyleCharNames.value.split(/[,，]/).map(c => c.trim()).filter(Boolean);
-            
             isAutoRunning.value = true;
+            isAutoPaused.value = false;
+            cancelAutoFlag.value = false; // 启动时重置中断标记
             
-            // 构建按顺序执行的脚本步骤队列
-            let steps = [
+            let stepsPhase1 = [
                 { script: 'f0', name: '全局基础RAG库初始化' },
                 { script: 'f1a', name: '本地物理指标与TTR统计' },
                 { script: 'f1b', name: '大模型深层文风提取' },
@@ -498,51 +539,62 @@ createApp({
                 { script: 'f2b', name: '大模型词汇清洗分类' }
             ];
             
-            // 如果是同人模式，继续追加设定和角色提取；如果是模仿模式则跳过
             if (autoPipelineType.value === 'fanfic') {
-                steps.push({ script: 'f3a', name: '专属词库提取' });
-                steps.push({ script: 'f3b', name: '世界观整理' });
-                
-                // 如果有角色，循环挂载f3c任务
-                for (const char of chars) {
-                    steps.push({ script: 'f3c', name: `角色卡提取 (${char})`, character: char });
-                }
-                
-                steps.push({ script: 'f4b', name: '剧情动态压缩建库' });
+                stepsPhase1.push({ script: 'f3a', name: '专属词库提取' });
+                stepsPhase1.push({ script: 'f3b', name: '世界观整理' });
             }
 
             try {
-                for (const step of steps) {
-                    autoRunProgress.value = `${step.script} - ${step.name}`;
-                    
-                    let url = `/api/scripts/${step.script}?target_file=${selectedReference.value}`;
-                    
-                    // 指定模型传参
-                    if (['f1b', 'f2b', 'f3a', 'f3b', 'f3c'].includes(step.script)) {
-                        url += `&model=${workflowStyleModel.value}`;
-                    }
-                    
-                    // 角色参数
-                    if (step.script === 'f3c') {
-                        url += `&character=${step.character}`;
-                    }
-                    
-                    // 发起任务
-                    const res = await fetch(url, { method: 'POST' });
-                    if (!res.ok) throw new Error(`${step.script} 请求失败`);
-                    
-                    const data = await res.json();
-                    if (data.error) throw new Error(data.error);
-                    
-                    // 队列阻塞：一直等待该任务成功后才继续循环下一个
-                    if (data.task_id) {
-                        await waitForTask(data.task_id);
-                    }
-                    await pollTasks(); // 立刻刷新左边队列UI
+                // 执行第一阶段
+                for (const step of stepsPhase1) {
+                    await executePipelineStep(step);
                 }
-                alert("✅ 一键文风提取与仿写数据流构建：全自动流水线全部执行完成！");
+                
+                // 二次校验是否被取消
+                if (cancelAutoFlag.value) throw new Error("用户手动终止了流水线");
+
+                if (autoPipelineType.value === 'fanfic') {
+                    // 主动暂停，触发断点 UI
+                    autoRunProgress.value = "等待人工干预：角色提取确认";
+                    isAutoPaused.value = true;
+                    await loadCharacterSuggestions();
+                } else {
+                    alert("✅ 模仿模式：基础文风提取流水线执行完成！");
+                    isAutoRunning.value = false;
+                    autoRunProgress.value = '';
+                }
             } catch (e) {
-                alert(`❌ 流水线执行中断或遇到错误: ${e.message}`);
+                if (e.message.includes('手动终止')) {
+                    alert("🛑 已成功终止流水线任务队列。");
+                } else {
+                    alert(`❌ 流水线执行中断或遇到错误: ${e.message}`);
+                }
+                isAutoRunning.value = false;
+                isAutoPaused.value = false;
+                autoRunProgress.value = '';
+            }
+        };
+
+        const continueAutoPipeline = async () => {
+            isAutoPaused.value = false;
+            if (cancelAutoFlag.value) return; 
+
+            const chars = workflowCharName.value.split(/[,，]/).map(c => c.trim()).filter(Boolean);
+            
+            try {
+                // 执行第二阶段：循环角色提取和最终的大纲压缩建库
+                for (const char of chars) {
+                    await executePipelineStep({ script: 'f3c', name: `角色卡提取 (${char})` }, char);
+                }
+                await executePipelineStep({ script: 'f4b', name: '剧情动态压缩建库' });
+                
+                alert("✅ 同人模式：文风提取与仿写数据流构建全部执行完成！");
+            } catch(e) {
+                if (e.message.includes('手动终止')) {
+                    alert("🛑 已成功终止流水线任务队列。");
+                } else {
+                    alert(`❌ 后半段流水线中断: ${e.message}`);
+                }
             } finally {
                 isAutoRunning.value = false;
                 autoRunProgress.value = '';
@@ -635,12 +687,12 @@ createApp({
                 return;
             }
 
-            let url = `/api/scripts/${workflowProjectScript.value}?project_name=${currentProject.value}`;
+            let url = `/api/scripts/${workflowProjectScript.value}?project_name=${encodeURIComponent(currentProject.value)}`;
             url += `&model=${workflowProjectModel.value}`;
             
             if (['f5a', 'f5b', 'f7'].includes(workflowProjectScript.value)) {
                  if (!workflowChapterName.value.trim()) { alert("需指明目标章节名。"); return; }
-                 url += `&chapter_name=${workflowChapterName.value.trim()}`;
+                 url += `&chapter_name=${encodeURIComponent(workflowChapterName.value.trim())}`;
             }
             
             await fetch(url, { method: 'POST' });
@@ -650,15 +702,14 @@ createApp({
         const runStyleScript = async () => {
             if (!selectedReference.value) { alert("请先选择参考原著文件。"); return; }
             
-            // 👈 新增 &force=true，告诉后台我是单步点击的，不准跳过！ 
-            let url = `/api/scripts/${workflowStyleScript.value}?target_file=${selectedReference.value}&force=true`;
+            let url = `/api/scripts/${workflowStyleScript.value}?target_file=${encodeURIComponent(selectedReference.value)}&force=true`;
             if (['f1b', 'f2b', 'f3a', 'f3b', 'f3c'].includes(workflowStyleScript.value)) {
                 url += `&model=${workflowStyleModel.value}`;
             }
 
             if (workflowStyleScript.value === 'f3c') {
                 if (!workflowCharName.value.trim()) { alert("需指明目标角色名参数。"); return; }
-                url += `&character=${workflowCharName.value.trim()}`;
+                url += `&character=${encodeURIComponent(workflowCharName.value.trim())}`;
             }
             
             await fetch(url, { method: 'POST' });
@@ -765,11 +816,10 @@ createApp({
             workflowChapterName, workflowChapterSelect, workflowChapterBrief, workflowF4aMode, workflowF4aInput, projectCharacters, workflowCharSelect, f4aChar, f4aWorldview,
             fileInput, uploadFileName, handleFileUpload, submitUpload, loadReferences,
             
-            // 暴露 f3c 角色面板变量
             recommendedChars, freqChars, customCharInput, showCharSelector, isLoadingChars, loadCharacterSuggestions,
             
-            // 导出一键流水线绑定的变量和方法
-            styleExtractMode, autoPipelineType, autoStyleCharNames, isAutoRunning, autoRunProgress, runStyleScriptAuto
+            styleExtractMode, autoPipelineType, autoStyleCharNames, isAutoRunning, autoRunProgress, runStyleScriptAuto,
+            isAutoPaused, cancelAutoFlag, continueAutoPipeline, stopAutoPipeline
         };
     }
 }).mount('#app');

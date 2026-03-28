@@ -11,6 +11,12 @@ from .models import ProjectCreate, ChapterUpdate, AppendContent, SettingUpdate
 
 router = APIRouter()
 
+# 【新增辅助函数】：用来识别这是普通工程，还是文风库工程
+def get_real_dir(proj_name: str):
+    if proj_name.startswith("style@@"):
+        return os.path.join(STYLE_DIR, proj_name.replace("style@@", ""))
+    return os.path.join(PROJ_DIR, proj_name)
+
 # --- 小说工作台项目管理 API ---
 @router.get("/api/projects")
 async def get_projects():
@@ -117,7 +123,8 @@ async def get_chapters(proj_name: str):
 
 @router.get("/api/projects/{proj_name}/characters")
 async def get_characters(proj_name: str):
-    char_dir = os.path.join(PROJ_DIR, proj_name, "character_profiles")
+    base_dir = get_real_dir(proj_name) # 改用真实路径
+    char_dir = os.path.join(base_dir, "character_profiles")
     if not os.path.exists(char_dir):
         return []
     return [os.path.splitext(f)[0] for f in os.listdir(char_dir) if f.endswith(".md")]
@@ -159,7 +166,8 @@ async def append_to_novel(proj_name: str, req: AppendContent):
 
 @router.get("/api/projects/{proj_name}/settings/{file_path:path}")
 async def get_project_setting(proj_name: str, file_path: str):
-    filepath = os.path.join(PROJ_DIR, proj_name, file_path)
+    base_dir = get_real_dir(proj_name) # 改用真实路径
+    filepath = os.path.join(base_dir, file_path)
     if os.path.exists(filepath):
         with open(filepath, "r", encoding="utf-8") as f:
             return {"content": f.read()}
@@ -167,7 +175,8 @@ async def get_project_setting(proj_name: str, file_path: str):
 
 @router.put("/api/projects/{proj_name}/settings/{file_path:path}")
 async def update_project_setting(proj_name: str, file_path: str, update: SettingUpdate):
-    filepath = os.path.join(PROJ_DIR, proj_name, file_path)
+    base_dir = get_real_dir(proj_name) # 改用真实路径
+    filepath = os.path.join(base_dir, file_path)
     os.makedirs(os.path.dirname(filepath), exist_ok=True)
     with open(filepath, "w", encoding="utf-8") as f:
         f.write(update.content)
@@ -175,7 +184,8 @@ async def update_project_setting(proj_name: str, file_path: str, update: Setting
 
 @router.get("/api/projects/{proj_name}/outlines")
 async def get_outlines(proj_name: str):
-    outline_dir = os.path.join(PROJ_DIR, proj_name, "chapter_structures")
+    base_dir = get_real_dir(proj_name) # 改用真实路径
+    outline_dir = os.path.join(base_dir, "chapter_structures")
     if not os.path.exists(outline_dir):
         return []
     return [f for f in os.listdir(outline_dir) if f.endswith(".md") or f.endswith(".json")]

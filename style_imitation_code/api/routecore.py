@@ -39,9 +39,9 @@ async def internal_embed(req: EmbedRequest):
 # =====================================================================
 
 # --- 基础 API 路由 ---
-@router.get("/")
-async def serve_frontend():
-    return FileResponse(os.path.join(CODE_DIR, "index.html"))
+# @router.get("/")
+# async def serve_frontend():
+#     return FileResponse(os.path.join(CODE_DIR, "index.html"))
 
 @router.post("/api/chat")
 async def chat_stream(req: ChatRequest):

@@ -138,6 +138,7 @@ async def run_script(
             "name": f"⏭️ [缓存跳过] {script_type} [{model}]: {target_name}", 
             "type": script_type, 
             "status": "success", 
+            "start_time": datetime.now().isoformat(),  # 修改点：增加 start_time 以修复排序沉底 Bug
             "created_at": datetime.now().isoformat(), 
             "end_time": datetime.now().isoformat(), 
             "ref_file": target_name, 

@@ -12,12 +12,14 @@ if sys.platform.startswith('win'):
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 load_dotenv()
 
-# 3. 物理目录架构对齐
-# 当前文件位于: D:\StyleSync-Novel\core\_core_config.py
-BASE_DIR = os.path.dirname(os.path.abspath(__file__)) # 指向 core/ 目录
-
-# 向上退一级！回到 D:\StyleSync-Novel
-PROJECT_ROOT = os.path.dirname(BASE_DIR)
+# 3. 根目录定义 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__)) # 这是 core/ 目录 
+ 
+# 修改前：只退了 1 层，定位到了 style_imitation_code 
+# PROJECT_ROOT = os.path.dirname(BASE_DIR) 
+ 
+# 修改后：退 2 层，精准定位到 D:\StyleSync-Novel 
+PROJECT_ROOT = os.path.dirname(os.path.dirname(BASE_DIR)) 
 
 # 4. 映射实际物理文件夹
 CODE_DIR = os.path.join(PROJECT_ROOT, "style_imitation_code")

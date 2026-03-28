@@ -3,10 +3,12 @@ import os
 # 【关键配置】：在导入模型库之前，强制设置 HuggingFace 国内镜像源环境
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 
-# --- 1. 物理目录架构严格对齐 ---
-# 当前文件位于: D:\StyleSync-Novel\api\config.py
-# 第一层 dirname 拿到 api/ 目录，第二层 dirname 拿到 D:\StyleSync-Novel
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# --- 1. 路径定义 --- 
+# 修改前：只退了 2 层，定位到了 style_imitation_code 
+# PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__))) 
+ 
+# 修改后：退 3 层，精准定位到 D:\StyleSync-Novel 
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) 
 
 # --- 2. 映射实际物理文件夹 ---
 CODE_DIR = os.path.join(PROJECT_ROOT, "style_imitation_code")

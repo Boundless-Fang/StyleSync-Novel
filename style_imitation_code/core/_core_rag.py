@@ -27,15 +27,32 @@ class RemoteEmbedder:
         # 如果传入的是单条文本，转为列表
         if isinstance(texts, str):
             texts = [texts]
-        try:
-            # 向主进程发起轻量级 HTTP 请求获取向量矩阵
-            response = requests.post(self.endpoint, json={"texts": texts}, timeout=120)
-            response.raise_for_status()
-            # 还原为原版 SentenceTransformer 产出的 numpy 矩阵格式，完美欺骗外层调用链
-            return np.array(response.json()["embeddings"], dtype='float32')
-        except Exception as e:
-            print(f"⚠️ 调用主进程向量模型失败，请确保 FastAPI 后端正在运行: {e}")
-            raise
+            
+        all_embeddings = []
+        total_chunks = len(texts)
+        
+        # 【致命 Bug 修复】：强制引入批处理逻辑，避免全量数据一把梭导致主进程噎死或超时
+        for i in range(0, total_chunks, batch_size):
+            batch_texts = texts[i:i + batch_size]
+            try:
+                # 向主进程发起轻量级 HTTP 请求获取向量矩阵
+                response = requests.post(self.endpoint, json={"texts": batch_texts}, timeout=120)
+                response.raise_for_status()
+                
+                # 收集该批次的向量结果
+                all_embeddings.extend(response.json()["embeddings"])
+                
+                # 同步打印进度，强制 flush 吐给前端，避免假死感
+                if show_progress_bar:
+                    current = min(i + batch_size, total_chunks)
+                    print(f"🚀 向量化批处理进度: {current} / {total_chunks} 块", flush=True)
+                    
+            except Exception as e:
+                print(f"⚠️ 调用主进程向量模型失败 (批次 {i} - {i+batch_size}): {e}")
+                raise
+                
+        # 还原为原版 SentenceTransformer 产出的 numpy 矩阵格式，完美欺骗外层调用链
+        return np.array(all_embeddings, dtype='float32')
 
 class RAGRetriever:
     def __init__(self):
