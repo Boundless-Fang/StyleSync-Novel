@@ -38,7 +38,14 @@ def call_deepseek_api(system_prompt, user_prompt, model="deepseek-chat", tempera
             timeout=(10, 600)  # 连接给 10秒，读取放宽到 600秒(10分钟)以防 R1 深度思考
         )
         response.raise_for_status()
-        return response.json()['choices'][0]['message']['content']
+        data = response.json()
+        
+        # 【修复：Token 统计】提取消耗并强制打印到标准输出，供外层 tasks.py 捕获
+        if 'usage' in data:
+            total_tokens = data['usage'].get('total_tokens', 0)
+            print(f"\nTotal Tokens: {total_tokens}", flush=True)
+            
+        return data['choices'][0]['message']['content']
     except requests.exceptions.RequestException as e:
         raise RuntimeError(f"DeepSeek API 请求失败: {str(e)}")
 
@@ -64,7 +71,9 @@ def stream_deepseek_api(system_prompt, user_prompt, model="deepseek-chat", tempe
             {"role": "user", "content": user_prompt}
         ],
         "temperature": temperature,
-        "stream": True # 开启流式输出
+        "stream": True, # 开启流式输出
+        # 【修复：Token 统计】流式 API 默认不返还 Token，必须显式开启该选项
+        "stream_options": {"include_usage": True} 
     }
     
     with requests.post(
@@ -81,6 +90,13 @@ def stream_deepseek_api(system_prompt, user_prompt, model="deepseek-chat", tempe
                 if decoded_line.startswith('data: ') and decoded_line != 'data: [DONE]':
                     try:
                         json_data = json.loads(decoded_line[6:])
+                        
+                        # 【修复：Token 统计】拦截流数据最后一块的 usage 统计，抛入标准输出
+                        if 'usage' in json_data and json_data['usage']:
+                            total_tokens = json_data['usage'].get('total_tokens', 0)
+                            print(f"\nTotal Tokens: {total_tokens}", flush=True)
+                            continue
+                            
                         if 'choices' in json_data and len(json_data['choices']) > 0:
                             delta_content = json_data['choices'][0]['delta'].get('content', '')
                             if delta_content:

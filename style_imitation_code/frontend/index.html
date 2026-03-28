@@ -72,6 +72,10 @@
                             <span v-if="task.end_time">{{ new Date(task.end_time).toLocaleTimeString() }}</span>
                             <span v-else>启动于 {{ new Date(task.created_at || Date.now()).toLocaleTimeString() }}</span>
                         </div>
+
+                        <div v-if="task.status === 'running' && task.stdout" class="mt-2 bg-gray-900 text-green-400 p-2 rounded text-xs font-mono max-h-24 overflow-y-auto whitespace-pre-wrap shadow-inner leading-relaxed border border-gray-700">
+                            {{ task.stdout.split('\n').slice(-4).join('\n') || '等待进程回传数据...' }}
+                        </div>
                         
                         <div v-if="task.ref_file" class="text-xs text-gray-500 border-t border-gray-100 pt-1 mt-1 truncate" :title="task.ref_file">
                             <i class="fa-solid fa-book-open text-gray-400 mr-1"></i>{{ task.ref_file }}
@@ -512,10 +516,67 @@
                         <option value="f4b">f4b - 剧情动态压缩建库</option>
                     </select>
 
-                    <div v-if="workflowStyleScript === 'f3c'" class="mb-3">
-                        <label class="text-xs text-gray-500 block mb-1">指定目标角色名 (例如：张小凡)</label>
-                        <input type="text" v-model="workflowCharName" placeholder="例如：张小凡" class="w-full text-sm border border-gray-300 rounded p-2 focus:ring-1 focus:ring-blue-500 outline-none">
+                <div v-if="workflowStyleScript === 'f3c'" class="mb-3">
+                    <label class="text-xs text-gray-500 block mb-1">提取目标 (将作为最终执行参数)：</label>
+                    <div class="space-y-2">
+                        <div class="flex gap-2">
+                            <input type="text" v-model="workflowCharName" placeholder="请点击右侧获取名单，或在此手动输入" class="flex-1 text-sm border border-gray-300 rounded p-2 outline-none bg-white">
+                            <button @click="loadCharacterSuggestions" class="px-3 py-1.5 bg-blue-50 text-blue-600 border border-blue-200 rounded text-xs font-bold hover:bg-blue-100 transition-colors shadow-sm whitespace-nowrap">
+                                <i class="fa-solid fa-users-viewfinder mr-1"></i> 获取推荐名单
+                            </button>
+                        </div>
+
+                        <div v-if="showCharSelector" class="p-3 bg-white border border-blue-100 rounded shadow-inner space-y-4">
+                            <div v-if="isLoadingChars" class="text-xs text-blue-500 flex items-center gap-2">
+                                <i class="fa-solid fa-spinner fa-spin"></i>  正在解析世界观设定与全书词频数据...
+                            </div>
+                            
+                            <div v-else>
+                                <div class="mb-4">
+                                    <h4 class="text-xs font-bold text-gray-700 mb-2 border-b pb-1 border-gray-100 flex justify-between">
+                                        <span>🌟 推荐角色 (来自 f3b 设定)</span>
+                                    </h4>
+                                    <div v-if="recommendedChars.length === 0" class="text-xs text-gray-400 italic">未在设定中识别到角色。</div>
+                                    <div class="flex flex-wrap gap-2">
+                                        <div v-for="(char, idx) in recommendedChars" :key="idx" class="flex items-center text-xs bg-blue-50 border border-blue-200 rounded overflow-hidden shadow-sm">
+                                            <label class="flex items-center px-2 py-1.5 cursor-pointer hover:bg-blue-100 transition-colors">
+                                                <input type="checkbox" v-model="char.selected" class="mr-1.5 accent-blue-600">
+                                                <span v-if="!char.editing" class="font-medium text-blue-800">{{ char.name }} <span v-if="char.aliases" class="text-gray-500 font-normal">({{ char.aliases }})</span></span>
+                                            </label>
+                                            
+                                            <div v-if="char.editing" class="flex items-center px-1 bg-white border-l border-blue-200 py-1">
+                                                <input type="text" v-model="char.name" class="w-14 px-1 border-b border-gray-300 outline-none text-xs" placeholder="名字">
+                                                <input type="text" v-model="char.aliases" class="w-16 px-1 border-b border-gray-300 outline-none text-xs ml-1" placeholder="别名/身份">
+                                                <button @click="char.editing = false" class="text-green-600 hover:text-green-800 ml-2" title="确定"><i class="fa-solid fa-check"></i></button>
+                                            </div>
+                                            
+                                            <div v-else class="flex items-center border-l border-blue-200 bg-white">
+                                                <button @click="char.editing = true" class="px-2 py-1.5 text-blue-500 hover:bg-blue-100 transition-colors" title="修改"><i class="fa-solid fa-pen"></i></button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="mb-4">
+                                    <h4 class="text-xs font-bold text-gray-700 mb-2 border-b pb-1 border-gray-100">📊 备选添加 (按全书词频排序)</h4>
+                                    <div v-if="freqChars.length === 0" class="text-xs text-gray-400 italic">暂无词频数据，请先运行 f2a。</div>
+                                    <div class="flex flex-wrap gap-1.5 max-h-32 overflow-y-auto p-1 bg-gray-50 rounded border border-gray-100">
+                                        <label v-for="(char, idx) in freqChars" :key="'f'+idx" 
+                                            :class="['text-xs px-2 py-1 rounded border cursor-pointer transition-colors shadow-sm', char.selected ? 'bg-green-50 border-green-400 text-green-800 font-bold' : 'bg-white border-gray-200 text-gray-600 hover:bg-blue-50']">
+                                            <input type="checkbox" v-model="char.selected" class="hidden">
+                                            <i v-if="char.selected" class="fa-solid fa-plus mr-1"></i>{{ char.name }} <span class="text-gray-400 scale-90 inline-block font-normal">({{ char.freq }})</span>
+                                        </label>
+                                    </div>
+                                </div>
+
+                                <div>
+                                    <h4 class="text-xs font-bold text-gray-700 mb-2 border-b pb-1 border-gray-100">✍️ 自定义补充</h4>
+                                    <input type="text" v-model="customCharInput" placeholder="在此输入其余漏掉的角色，例如：小医仙(女主), 海波东" class="w-full text-xs border border-gray-300 rounded p-2 outline-none focus:ring-1 focus:ring-blue-500 shadow-sm">
+                                </div>
+                            </div>
+                        </div>
                     </div>
+                </div>
                 </div>
 
                 <div v-if="styleExtractMode === 'auto'" class="p-3 bg-blue-50 border border-blue-200 rounded mb-3">
@@ -537,6 +598,46 @@
                     <div v-if="isAutoRunning" class="mt-2 p-2 bg-white rounded border border-blue-100 flex items-center gap-2 text-sm text-blue-700 font-bold shadow-inner">
                         <i class="fa-solid fa-circle-notch fa-spin"></i>
                         <span>正在执行: {{ autoRunProgress }}</span>
+                    </div>
+
+                    <div v-if="isAutoPaused" class="mt-4 p-4 bg-yellow-50 border border-yellow-300 rounded-lg shadow-sm">
+                        <h4 class="text-sm font-bold text-yellow-800 mb-2"><i class="fa-solid fa-hand"></i> 步骤暂停：请确认需提取的角色</h4>
+                        <p class="text-xs text-yellow-700 mb-3">前半段基础特征已提取完成。请在此复查并勾选角色，点击确认后将继续完成管线。</p>
+                        
+                        <div class="space-y-3">
+                            <input type="text" v-model="workflowCharName" placeholder="勾选下方角色，或手动输入(逗号分隔)" class="w-full text-sm border border-yellow-400 rounded p-2 outline-none bg-white font-bold text-blue-700">
+                            
+                            <div v-if="isLoadingChars" class="text-xs text-yellow-600 mb-2 flex items-center gap-2">
+                                <i class="fa-solid fa-spinner fa-spin"></i> 正在读取刚生成的设定与词频...
+                            </div>
+                            
+                            <div v-else class="space-y-4 bg-white p-3 rounded border border-yellow-200 mb-3 max-h-48 overflow-y-auto">
+                                <div>
+                                    <span class="text-xs font-bold text-gray-700 mb-2 block border-b pb-1 border-gray-100">🌟 推荐角色 (来自 f3b 设定)</span>
+                                    <div class="flex flex-wrap gap-2">
+                                        <label v-for="(char, idx) in recommendedChars" :key="'ar'+idx" class="flex items-center text-xs bg-blue-50 border border-blue-200 rounded px-2 py-1.5 cursor-pointer hover:bg-blue-100 shadow-sm transition-colors">
+                                            <input type="checkbox" v-model="char.selected" class="mr-1.5 accent-blue-600">
+                                            <span class="font-medium text-blue-800">{{ char.name }} <span class="text-gray-500 font-normal ml-1">({{ char.aliases || '未知' }})</span></span>
+                                        </label>
+                                        <span v-if="recommendedChars.length===0" class="text-xs text-gray-400 italic">未能从设定文档中自动解析出主要角色。</span>
+                                    </div>
+                                </div>
+                                <div>
+                                    <span class="text-xs font-bold text-gray-700 mb-2 block border-b pb-1 border-gray-100">📊 高频词备选 (根据 f2a 全书词汇倒序)</span>
+                                    <div class="flex flex-wrap gap-1.5">
+                                        <label v-for="(char, idx) in freqChars" :key="'af'+idx" class="flex items-center text-xs bg-gray-50 border border-gray-200 rounded px-2 py-1 cursor-pointer hover:bg-gray-100 transition-colors">
+                                            <input type="checkbox" v-model="char.selected" class="mr-1.5 accent-gray-600">
+                                            <span class="text-gray-700">{{ char.name }}</span> <span class="text-gray-400 scale-90 ml-1">({{ char.freq }})</span>
+                                        </label>
+                                        <span v-if="freqChars.length===0" class="text-xs text-gray-400 italic">词库暂无备选。</span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <button @click="continueAutoPipeline" class="w-full py-2.5 bg-yellow-500 hover:bg-yellow-600 text-white text-sm font-bold rounded shadow-md transition-colors flex justify-center items-center gap-2">
+                                确认名单，继续执行流水线 <i class="fa-solid fa-forward-step"></i>
+                            </button>
+                        </div>
                     </div>
                 </div>
 
@@ -568,7 +669,7 @@
                             <option v-for="p in projects" :value="p">{{ p }}</option>
                         </optgroup>
                         <optgroup label="风格模仿项目 (text_style_imitation)">
-                            <option v-for="s in availableStyles" :value="'../text_style_imitation/' + s">{{ s }}</option>
+                            <option v-for="s in availableStyles" :value="'style@@' + s">{{ s }}</option>
                         </optgroup>
                     </select>
                 </div>

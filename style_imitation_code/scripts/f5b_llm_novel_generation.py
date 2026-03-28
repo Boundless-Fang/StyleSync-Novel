@@ -67,6 +67,7 @@ class NovelGenerationApp:
         self.root.update_idletasks()
 
     def start_process_thread(self):
+        import tkinter.messagebox as messagebox
         project_name = self.project_var.get().strip()
         chapter_name = self.chapter_name_var.get().strip()
         
@@ -227,9 +228,8 @@ class NovelGenerationApp:
                     f.write(chunk)
                     f.flush()
             
+            # 【关键修改】：去掉了那句伪造 0 Token 的打印，让底层引擎的 Token 打印顺利穿透到界面
             log_func(f"\n\n✅ 章节正文生成完毕！物理文件已落盘至: {output_filepath}")
-            # 伪造一个 Token 输出用于被前端正则捕获，防止报 Token=0
-            print("\nTotal Tokens: 0 (流式生成Token消耗以主进程实时捕获为准)")
             return True
         except Exception as e:
             log_func(f"\n❌ 流式生成中断或失败: {str(e)}")

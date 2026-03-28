@@ -1,57 +1,21 @@
+# --- File: routeworkflow.py ---
 import os
 import json
 import asyncio
 import uuid
-import re
 import random
 import shutil
 import sys
 from datetime import datetime
 
-from fastapi import APIRouter, Request, HTTPException, Header, UploadFile, File
-from fastapi.responses import StreamingResponse, FileResponse
-from openai import AsyncOpenAI
+from fastapi import APIRouter, HTTPException, Header, UploadFile, File
+from fastapi.responses import StreamingResponse
 
-# 引入模型库以驻留主进程
-from sentence_transformers import SentenceTransformer
-from pydantic import BaseModel
-
-# 引入我们刚刚拆分出的配置、模型和任务调度器
-from .config import CODE_DIR, REF_DIR, STYLE_DIR, PROJ_DIR, DICT_DIR, TEST_DIR
-from .models import (ChatRequest, ProjectCreate, ChapterUpdate, AppendContent, 
-                     SettingUpdate, SettingCompletionRequest, ChapterOutlineRequest, 
-                     NovelGenerationRequest)
-# 引入新分离出的后台锁和流式锁
-from .tasks import TASKS, background_semaphore, stream_semaphore, run_task_safely
+from .config import CODE_DIR, REF_DIR, STYLE_DIR, PROJ_DIR
+from .models import SettingCompletionRequest, ChapterOutlineRequest, NovelGenerationRequest
+from .tasks import TASKS, stream_semaphore, run_task_safely
 
 router = APIRouter()
-
-# =====================================================================
-# 全局常驻内存的 Embedding 模型服务生命周期与内部路由
-# =====================================================================
-class EmbedRequest(BaseModel):
-    texts: list[str]
-
-GLOBAL_EMBEDDER = None
-
-@router.on_event("startup")
-async def load_embedder():
-    global GLOBAL_EMBEDDER
-    print("🚀 正在预热加载全局 Embedding 模型 (BAAI/bge-m3)...")
-    # 整个 FastAPI 生命周期内仅实例化一次，常驻内存，耗时仅发生在启动阶段
-    GLOBAL_EMBEDDER = SentenceTransformer('BAAI/bge-m3')
-    print("✅ 全局 Embedding 模型加载完成，子进程 RAG 调用将实现毫秒级响应！")
-
-@router.post("/api/internal/embed")
-async def internal_embed(req: EmbedRequest):
-    """供本地子进程调用的内部向量化高速接口"""
-    if GLOBAL_EMBEDDER is None:
-        raise HTTPException(status_code=500, detail="全局 Embedding 模型尚未加载完成")
-    
-    # 在主进程内极速计算向量并打包返回给 _core_rag 的 RemoteEmbedder
-    embeddings = GLOBAL_EMBEDDER.encode(req.texts, show_progress_bar=False)
-    return {"embeddings": embeddings.tolist()}
-# =====================================================================
 
 # --- 助手函数：Markdown 无序列表词库安全洗牌（解决生成套路化问题） ---
 def shuffle_markdown_lists(filepath: str):
@@ -80,214 +44,7 @@ def shuffle_markdown_lists(filepath: str):
     with open(filepath, 'w', encoding='utf-8') as f:
         f.writelines(out_lines)
 
-
-# --- 4. 基础 API 路由 ---
-@router.get("/")
-async def serve_frontend():
-    return FileResponse(os.path.join(CODE_DIR, "index.html"))
-
-@router.post("/api/chat")
-async def chat_stream(req: ChatRequest):
-    client = AsyncOpenAI(api_key=req.api_key, base_url="https://api.deepseek.com")
-    messages = []
-    if req.system_prompt:
-        messages.append({"role": "system", "content": req.system_prompt})
-    messages.extend(req.messages)
-
-    async def generate():
-        try:
-            stream = await client.chat.completions.create(
-                model=req.model,
-                messages=messages,
-                stream=True,
-                temperature=req.temperature,
-                top_p=req.top_p,
-                stream_options={"include_usage": True} 
-            )
-            async for chunk in stream:
-                # 处理正常文本流
-                if chunk.choices and len(chunk.choices) > 0 and chunk.choices[0].delta.content:
-                    yield chunk.choices[0].delta.content
-                
-                # 提取 usage 并按前端格式返回以便前端正则拦截
-                if getattr(chunk, 'usage', None) and chunk.usage:
-                    yield f"__USAGE__:{chunk.usage.prompt_tokens},{chunk.usage.completion_tokens}__"
-                    
-        except Exception as e:
-            yield f"\n\n[系统请求错误: {str(e)}]"
-
-    return StreamingResponse(generate(), media_type="text/plain")
-
-# --- 5. 小说工作台项目管理 API ---
-@router.get("/api/projects")
-async def get_projects():
-    return [f for f in os.listdir(PROJ_DIR) if os.path.isdir(os.path.join(PROJ_DIR, f))]
-
-@router.get("/api/styles")
-async def get_styles():
-    if not os.path.exists(STYLE_DIR):
-        return []
-    return [f for f in os.listdir(STYLE_DIR) if os.path.isdir(os.path.join(STYLE_DIR, f))]
-
-@router.post("/api/projects")
-async def create_project(proj: ProjectCreate):
-    base_name = proj.name.strip()
-    if not base_name.endswith("_style_imitation"):
-        dir_name = f"{base_name}_style_imitation"
-    else:
-        dir_name = base_name
-        
-    target_proj_dir = os.path.join(PROJ_DIR, dir_name)
-    
-    # 1. 创建基础目录结构
-    for folder in ["content", "character_profiles", "chapter_structures"]:
-        os.makedirs(os.path.join(target_proj_dir, folder), exist_ok=True)
-
-    # 2. 记录项目配置（锁定模式）
-    config_path = os.path.join(target_proj_dir, "project_config.json")
-    project_config = {
-        "name": proj.name,
-        "mode": proj.branch,  # 原创 | 同人 | 默认
-        "reference_style": proj.reference_style,
-        "created_at": datetime.now().isoformat()
-    }
-    with open(config_path, "w", encoding="utf-8") as f:
-        json.dump(project_config, f, ensure_ascii=False, indent=2)
-
-    # 3. 根据模式执行文件初始化逻辑
-    src_style_dir = os.path.join(STYLE_DIR, proj.reference_style) if proj.reference_style else None
-
-    # === 同人模式 ===
-    if proj.branch == "同人":
-        if not src_style_dir or not os.path.exists(src_style_dir):
-            return {"error": "同人模式必须选择有效的参考文风库"}
-            
-        # 全量拷贝文件
-        for filename in ["features.md", "world_settings.md", "plot_outlines.md", "positive_words.md", "negative_words.md", "exclusive_vocab.md"]:
-            src_file = os.path.join(src_style_dir, filename)
-            if os.path.exists(src_file):
-                shutil.copy2(src_file, os.path.join(target_proj_dir, filename))
-        
-        # 全量拷贝文件夹
-        for folder in ["character_profiles", "hierarchical_rag_db"]:
-            src_folder = os.path.join(src_style_dir, folder)
-            if os.path.exists(src_folder):
-                dst_folder = os.path.join(target_proj_dir, folder)
-                if os.path.exists(dst_folder):
-                    shutil.rmtree(dst_folder)
-                shutil.copytree(src_folder, dst_folder)
-
-    # === 原创模式 ===
-    elif proj.branch == "原创":
-        if not src_style_dir or not os.path.exists(src_style_dir):
-            return {"error": "原创模式必须选择有效的参考文风库"}
-
-        # 仅拷贝文风数据
-        for filename in ["features.md", "positive_words.md", "negative_words.md"]:
-            src_file = os.path.join(src_style_dir, filename)
-            if os.path.exists(src_file):
-                shutil.copy2(src_file, os.path.join(target_proj_dir, filename))
-        
-        # 强制生成空的设定文件（不拷贝原著设定）
-        open(os.path.join(target_proj_dir, "world_settings.md"), 'w', encoding='utf-8').close()
-        # character_profiles 已在前面创建为空目录
-        # 不拷贝 hierarchical_rag_db
-
-    # === 默认模式 ===
-    else: # 默认模式或其他
-        # 不执行任何拷贝，生成全量空白文件
-        pass
-
-    # 4. 兜底检测：确保核心文件存在（若未拷贝则生成空白）
-    files_to_check = [
-        "features.md", 
-        "world_settings.md", 
-        "positive_words.md",
-        "negative_words.md"
-    ]
-    for filename in files_to_check:
-        f_path = os.path.join(target_proj_dir, filename)
-        if not os.path.exists(f_path):
-            open(f_path, 'w', encoding='utf-8').close()
-        
-    with open(os.path.join(target_proj_dir, "content", "第一章.txt"), "w", encoding="utf-8") as f:
-        f.write("这里是小说的开头...")
-        
-    return {"status": "success"}
-
-@router.get("/api/projects/{proj_name}/chapters")
-async def get_chapters(proj_name: str):
-    content_dir = os.path.join(PROJ_DIR, proj_name, "content")
-    if not os.path.exists(content_dir):
-        return []
-    return [f for f in os.listdir(content_dir) if f.endswith(".txt")]
-
-@router.get("/api/projects/{proj_name}/characters")
-async def get_characters(proj_name: str):
-    char_dir = os.path.join(PROJ_DIR, proj_name, "character_profiles")
-    if not os.path.exists(char_dir):
-        return []
-    return [os.path.splitext(f)[0] for f in os.listdir(char_dir) if f.endswith(".md")]
-
-@router.post("/api/projects/{proj_name}/chapters/{chap_name}")
-async def create_or_rename_chapter(proj_name: str, chap_name: str, new_name: str = None):
-    content_dir = os.path.join(PROJ_DIR, proj_name, "content")
-    if new_name:
-        os.rename(os.path.join(content_dir, f"{chap_name}.txt"), os.path.join(content_dir, f"{new_name}.txt"))
-    else:
-        open(os.path.join(content_dir, f"{chap_name}.txt"), 'w', encoding='utf-8').close()
-    return {"status": "success"}
-
-@router.get("/api/projects/{proj_name}/chapters/{chap_name}/content")
-async def get_chapter_content(proj_name: str, chap_name: str):
-    filepath = os.path.join(PROJ_DIR, proj_name, "content", f"{chap_name}.txt")
-    if os.path.exists(filepath):
-        with open(filepath, "r", encoding="utf-8") as f:
-            return {"content": f.read()}
-    return {"content": ""}
-
-@router.put("/api/projects/{proj_name}/chapters/{chap_name}/content")
-async def update_chapter_content(proj_name: str, chap_name: str, update: ChapterUpdate):
-    filepath = os.path.join(PROJ_DIR, proj_name, "content", f"{chap_name}.txt")
-    with open(filepath, "w", encoding="utf-8") as f:
-        f.write(update.content)
-    return {"status": "success"}
-
-@router.post("/api/projects/{proj_name}/append")
-async def append_to_novel(proj_name: str, req: AppendContent):
-    content_dir = os.path.join(PROJ_DIR, proj_name, "content")
-    chapters = [f for f in os.listdir(content_dir) if f.endswith(".txt")]
-    if not chapters:
-        return {"error": "未找到章节文件"}
-    target_file = os.path.join(content_dir, chapters[0])
-    with open(target_file, "a", encoding="utf-8") as f:
-        f.write("\n\n" + req.content)
-    return {"status": "success"}
-
-@router.get("/api/projects/{proj_name}/settings/{file_path:path}")
-async def get_project_setting(proj_name: str, file_path: str):
-    filepath = os.path.join(PROJ_DIR, proj_name, file_path)
-    if os.path.exists(filepath):
-        with open(filepath, "r", encoding="utf-8") as f:
-            return {"content": f.read()}
-    return {"content": "文件不存在或尚未生成，请检查工作流执行状态。"}
-
-@router.put("/api/projects/{proj_name}/settings/{file_path:path}")
-async def update_project_setting(proj_name: str, file_path: str, update: SettingUpdate):
-    filepath = os.path.join(PROJ_DIR, proj_name, file_path)
-    os.makedirs(os.path.dirname(filepath), exist_ok=True)
-    with open(filepath, "w", encoding="utf-8") as f:
-        f.write(update.content)
-    return {"status": "success"}
-
-@router.get("/api/projects/{proj_name}/outlines")
-async def get_outlines(proj_name: str):
-    outline_dir = os.path.join(PROJ_DIR, proj_name, "chapter_structures")
-    if not os.path.exists(outline_dir):
-        return []
-    return [f for f in os.listdir(outline_dir) if f.endswith(".md") or f.endswith(".json")]
-
-# --- 6. 自动化工作流 API (后台执行调度) ---
+# --- 自动化工作流 API (后台执行调度) ---
 @router.get("/api/references")
 async def get_references():
     return [f for f in os.listdir(REF_DIR) if os.path.isfile(os.path.join(REF_DIR, f))]
@@ -351,11 +108,11 @@ async def run_script(
      
     if not os.path.exists(script_path): 
         return {"error": f"系统拦截：未找到物理脚本文件 [{script_path}]"} 
- 
+
     target_name = os.path.basename(target_file) if target_file else "无目标文件" 
     if script_type == "f3c" and character: 
         target_name += f" ({character})" 
- 
+
     # ======================================================== 
     # 一键流水线 断点检索与跳过机制 
     # ======================================================== 
@@ -381,6 +138,7 @@ async def run_script(
             "name": f"⏭️ [缓存跳过] {script_type} [{model}]: {target_name}", 
             "type": script_type, 
             "status": "success", 
+            "start_time": datetime.now().isoformat(),  # 修改点：增加 start_time 以修复排序沉底 Bug
             "created_at": datetime.now().isoformat(), 
             "end_time": datetime.now().isoformat(), 
             "ref_file": target_name, 
@@ -390,7 +148,7 @@ async def run_script(
         } 
         return {"status": "started", "task_id": task_id, "message": "检测到缓存，已自动跳过"} 
     # ======================================================== 
- 
+
     cmd = [sys.executable, script_path, "--target_file", target_path] 
     if project_name: 
         cmd.extend(["--project", project_name]) 
@@ -414,7 +172,7 @@ async def run_script(
         "created_at": datetime.now().isoformat(), 
         "ref_file": target_name 
     } 
- 
+
     asyncio.create_task(run_task_safely(task_id, cmd, x_api_key)) 
     return {"status": "started", "task_id": task_id, "message": f"任务已加入执行队列: {script_name}"}
 

@@ -18,6 +18,13 @@ reference_novels/
 # 所有从原著提取出的文风、词库、向量库
 text_style_imitation/
 
+#大模型
+*.onnx
+*.bin
+*.safetensors
+huggingface/
+bge3/
+
 # === 4. 个人创作空间 (Workspace) ===
 # 你的小说项目、正文、大纲（保护版权与隐私）
 novel_projects/
