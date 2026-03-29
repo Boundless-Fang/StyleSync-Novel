@@ -189,3 +189,20 @@ async def get_outlines(proj_name: str):
     if not os.path.exists(outline_dir):
         return []
     return [f for f in os.listdir(outline_dir) if f.endswith(".md") or f.endswith(".json")]
+
+@router.get("/api/projects/{proj_name}/phase1_status") 
+async def check_phase1_status(proj_name: str): 
+    """检测 f0-f3b (世界观) 是否已生成""" 
+    base_dir = get_real_dir(proj_name) 
+    target_file = os.path.join(base_dir, "world_settings.md" ) 
+    is_done = os.path.exists(target_file) and os.path.getsize(target_file) > 50 
+    return {"is_done" : is_done} 
+ 
+@router.get("/api/projects/{proj_name}/prompts") 
+async def get_prompts(proj_name: str): 
+    """供知识库获取 prompt 指令列表""" 
+    base_dir = get_real_dir(proj_name) 
+    prompt_dir = os.path.join(base_dir, "chapter_specific_prompts" ) 
+    if not  os.path.exists(prompt_dir): 
+        return  [] 
+    return [f for f in os.listdir(prompt_dir) if f.endswith(".txt" )]

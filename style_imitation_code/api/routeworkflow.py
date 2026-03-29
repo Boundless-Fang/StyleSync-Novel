@@ -71,111 +71,6 @@ async def get_task_status(task_id: str):
         raise HTTPException(status_code=404, detail="任务不存在")
     return task
 
-@router.post("/api/scripts/{script_type}") 
-async def run_script( 
-    script_type: str, 
-    target_file: str = "", 
-    project_name: str = "", 
-    character: str = "", 
-    chapter_name: str = "", 
-    model: str = "deepseek-chat", 
-    force: bool = False, 
-    x_api_key: str = Header(None) 
-): 
-    script_map = { 
-        "f0": "f0_local_vector_indexer.py", 
-        "f1a": "f1a_local_text_stats.py", 
-        "f1b": "f1b_llm_style_feature.py", 
-        "f2a": "f2a_local_word_freq.py", 
-        "f2b": "f2b_llm_keyword_base.py", 
-        "f3a": "f3a_llm_exclusive_vocab.py", 
-        "f3b": "f3b_llm_worldview.py", 
-        "f3c": "f3c_llm_character.py", 
-        "f4a": "f4a_llm_setting_completion.py", 
-        "f4b": "f4b_llm_plot_compression.py", 
-        "f5a": "f5a_llm_chapter_outline.py", 
-        "f5b": "f5b_llm_novel_generation.py", 
-        "f6":  "f6_llm_plot_deduction.py", 
-        "f7":  "f7_llm_text_validation.py" 
-    } 
-     
-    script_name = script_map.get(script_type) 
-    if not script_name: 
-        return {"error": f"未知的脚本类型或该模块需走专用路由: {script_type}"} 
-         
-    script_path = os.path.join(CODE_DIR, "scripts", script_name) 
-    target_path = os.path.join(REF_DIR, target_file) if not os.path.isabs(target_file) else target_file 
-     
-    if not os.path.exists(script_path): 
-        return {"error": f"系统拦截：未找到物理脚本文件 [{script_path}]"} 
-
-    target_name = os.path.basename(target_file) if target_file else "无目标文件" 
-    if script_type == "f3c" and character: 
-        target_name += f" ({character})" 
-
-    # ======================================================== 
-    # 一键流水线 断点检索与跳过机制 
-    # ======================================================== 
-    novel_name = os.path.splitext(os.path.basename(target_file))[0] if target_file else "" 
-    style_dir = os.path.join(STYLE_DIR, f"{novel_name}_style_imitation") 
-     
-    check_file_map = { 
-        "f0": os.path.join(style_dir, "global_rag_db", "vector.index"), 
-        "f1a": os.path.join(style_dir, "statistics", "统计指标.txt"), 
-        "f1b": os.path.join(style_dir, "features.md"), 
-        "f2a": os.path.join(style_dir, "statistics", "高频词.txt"), 
-        "f2b": os.path.join(style_dir, "positive_words.md"), 
-        "f3a": os.path.join(style_dir, "exclusive_vocab.md"), 
-        "f3b": os.path.join(style_dir, "world_settings.md"), 
-        "f3c": os.path.join(style_dir, "character_profiles", f"{character}.md") if character else None, 
-        "f4b": os.path.join(style_dir, "hierarchical_rag_db", "chunks.json") 
-    } 
-     
-    target_output = check_file_map.get(script_type) 
-    if not force and target_output and os.path.exists(target_output) and os.path.getsize(target_output) > 10: 
-        task_id = str(uuid.uuid4()) 
-        TASKS[task_id] = { 
-            "name": f"⏭️ [缓存跳过] {script_type} [{model}]: {target_name}", 
-            "type": script_type, 
-            "status": "success", 
-            "start_time": datetime.now().isoformat(),  # 修改点：增加 start_time 以修复排序沉底 Bug
-            "created_at": datetime.now().isoformat(), 
-            "end_time": datetime.now().isoformat(), 
-            "ref_file": target_name, 
-            "stdout": f"检测到本地已存在产物：{os.path.basename(target_output)}，自动跳过执行以节省 Token 与算力。", 
-            "stderr": "", 
-            "tokens": 0 
-        } 
-        return {"status": "started", "task_id": task_id, "message": "检测到缓存，已自动跳过"} 
-    # ======================================================== 
-
-    cmd = [sys.executable, script_path, "--target_file", target_path] 
-    if project_name: 
-        cmd.extend(["--project", project_name]) 
-     
-    if script_type in ["f1b", "f2b", "f3a", "f3b", "f3c", "f4a", "f5a", "f5b", "f6", "f7"]: 
-        cmd.extend(["--model", model]) 
-         
-    if script_type == "f3c": 
-        if not character: 
-            return {"error": "执行 f3c 时必须传递 character 参数"} 
-        cmd.extend(["--character", character]) 
-         
-    if chapter_name and script_type in ["f5a", "f5b", "f7"]: 
-        cmd.extend(["--chapter", chapter_name]) 
-     
-    task_id = str(uuid.uuid4()) 
-    TASKS[task_id] = { 
-        "name": f"{script_type} [{model}]: {target_name}", 
-        "type": script_type, 
-        "status": "pending", 
-        "created_at": datetime.now().isoformat(), 
-        "ref_file": target_name 
-    } 
-
-    asyncio.create_task(run_task_safely(task_id, cmd, x_api_key)) 
-    return {"status": "started", "task_id": task_id, "message": f"任务已加入执行队列: {script_name}"}
-
 @router.post("/api/scripts/f4a_completion")
 async def run_f4a_completion(req: SettingCompletionRequest, x_api_key: str = Header(None)):
     script_path = os.path.join(CODE_DIR, "scripts", "f4a_llm_setting_completion.py")
@@ -280,7 +175,7 @@ async def export_f5b_prompt(req: NovelGenerationRequest):
 async def run_f5b_generate(req: NovelGenerationRequest, x_api_key: str = Header(None)):
     script_path = os.path.join(CODE_DIR, "scripts", "f5b_llm_novel_generation.py")
     if not os.path.exists(script_path):
-        raise HTTPException(status_code=404, detail=f"未找到执行脚本 {script_path}")
+        return {"error": f"未找到执行脚本 {script_path}"}
     
     project_config_path = os.path.join(PROJ_DIR, req.project_name, "project_config.json")
     branch_mode = "同人" 
@@ -292,6 +187,7 @@ async def run_f5b_generate(req: NovelGenerationRequest, x_api_key: str = Header(
         except:
             pass
 
+    # 词库洗牌
     for dict_file in ["positive_words.md", "negative_words.md", "exclusive_vocab.md"]:
         dict_path = os.path.join(PROJ_DIR, req.project_name, dict_file)
         shuffle_markdown_lists(dict_path)
@@ -304,29 +200,120 @@ async def run_f5b_generate(req: NovelGenerationRequest, x_api_key: str = Header(
         "--branch", branch_mode
     ]
 
-    async def stream_generator():
-        env = os.environ.copy()
-        if x_api_key:
-            env["DEEPSEEK_API_KEY"] = x_api_key
-            
-        # 改用流式专属并发锁，防止由于后台切分等耗时任务占线导致 504 错误
-        async with stream_semaphore:
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                env=env
-            )
-            while True:
-                line = await process.stdout.readline()
-                if not line:
-                    break
-                yield line.decode('utf-8')
-            
-            try:
-                await asyncio.wait_for(process.wait(), timeout=1800.0)
-            except asyncio.TimeoutError:
-                process.kill()
-                yield "\n\n[系统拦截：流式生成超时，进程已强制回收]"
+    # 加入任务队列，对齐 f0-f3
+    task_id = str(uuid.uuid4())
+    TASKS[task_id] = {
+        "name": f"f5b [{req.model}]: {req.project_name} - {req.chapter_name}",
+        "type": "f5b",
+        "status": "pending",
+        "created_at": datetime.now().isoformat(),
+        "ref_file": req.project_name
+    }
+    
+    asyncio.create_task(run_task_safely(task_id, cmd, x_api_key)) 
+    return {"status": "started", "task_id": task_id, "message": f"任务已加入执行队列: f5b 正文生成"}
 
-    return StreamingResponse(stream_generator(), media_type="text/plain")
+@router.post("/api/scripts/{script_type}") 
+async def run_script( 
+    script_type: str, 
+    target_file: str = "", 
+    project_name: str = "", 
+    character: str = "", 
+    chapter_name: str = "", 
+    model: str = "deepseek-chat", 
+    force: bool = False, 
+    x_api_key: str = Header(None) 
+): 
+    script_map = { 
+        "f0": "f0_local_vector_indexer.py", 
+        "f1a": "f1a_local_text_stats.py", 
+        "f1b": "f1b_llm_style_feature.py", 
+        "f2a": "f2a_local_word_freq.py", 
+        "f2b": "f2b_llm_keyword_base.py", 
+        "f3a": "f3a_llm_exclusive_vocab.py", 
+        "f3b": "f3b_llm_worldview.py", 
+        "f3c": "f3c_llm_character.py", 
+        "f4a": "f4a_llm_setting_completion.py", 
+        "f4b": "f4b_llm_plot_compression.py", 
+        "f5a": "f5a_llm_chapter_outline.py", 
+        "f5b": "f5b_llm_novel_generation.py", 
+        "f6":  "f6_llm_plot_deduction.py", 
+        "f7":  "f7_llm_text_validation.py" 
+    } 
+     
+    script_name = script_map.get(script_type) 
+    if not script_name: 
+        return {"error": f"未知的脚本类型或该模块需走专用路由: {script_type}"} 
+         
+    script_path = os.path.join(CODE_DIR, "scripts", script_name) 
+    target_path = os.path.join(REF_DIR, target_file) if not os.path.isabs(target_file) else target_file 
+     
+    if not os.path.exists(script_path): 
+        return {"error": f"系统拦截：未找到物理脚本文件 [{script_path}]"} 
+  
+    target_name = os.path.basename(target_file) if target_file else "无目标文件" 
+    if script_type == "f3c" and character: 
+        target_name += f" ({character})" 
+  
+    # ======================================================== 
+    # 一键流水线 断点检索与跳过机制 
+    # ======================================================== 
+    novel_name = os.path.splitext(os.path.basename(target_file))[0] if target_file else "" 
+    style_dir = os.path.join(STYLE_DIR, f"{novel_name}_style_imitation") 
+     
+    check_file_map = { 
+        "f0": os.path.join(style_dir, "global_rag_db", "vector.index"), 
+        "f1a": os.path.join(style_dir, "statistics", "统计指标.txt"), 
+        "f1b": os.path.join(style_dir, "features.md"), 
+        "f2a": os.path.join(style_dir, "statistics", "高频词.txt"), 
+        "f2b": os.path.join(style_dir, "positive_words.md"), 
+        "f3a": os.path.join(style_dir, "exclusive_vocab.md"), 
+        "f3b": os.path.join(style_dir, "world_settings.md"), 
+        "f3c": os.path.join(style_dir, "character_profiles", f"{character}.md") if character else None, 
+        "f4b": os.path.join(style_dir, "hierarchical_rag_db", "chunks.json") 
+    } 
+     
+    target_output = check_file_map.get(script_type) 
+    if not force and target_output and os.path.exists(target_output) and os.path.getsize(target_output) > 10: 
+        task_id = str(uuid.uuid4()) 
+        TASKS[task_id] = { 
+            "name": f"⏭️ [缓存跳过] {script_type} [{model}]: {target_name}", 
+            "type": script_type, 
+            "status": "success", 
+            "start_time": datetime.now().isoformat(),  # 修改点：增加 start_time 以修复排序沉底 Bug
+            "created_at": datetime.now().isoformat(), 
+            "end_time": datetime.now().isoformat(), 
+            "ref_file": target_name, 
+            "stdout": f"检测到本地已存在产物：{os.path.basename(target_output)}，自动跳过执行以节省 Token 与算力。", 
+            "stderr": "", 
+            "tokens": 0 
+        } 
+        return {"status": "started", "task_id": task_id, "message": "检测到缓存，已自动跳过"} 
+    # ======================================================== 
+  
+    cmd = [sys.executable, script_path, "--target_file", target_path] 
+    if project_name: 
+        cmd.extend(["--project", project_name]) 
+     
+    if script_type in ["f1b", "f2b", "f3a", "f3b", "f3c", "f4a", "f5a", "f5b", "f6", "f7"]: 
+        cmd.extend(["--model", model]) 
+         
+    if script_type == "f3c": 
+        if not character: 
+            return {"error": "执行 f3c 时必须传递 character 参数"} 
+        cmd.extend(["--character", character]) 
+         
+    if chapter_name and script_type in ["f5a", "f5b", "f7"]: 
+        cmd.extend(["--chapter", chapter_name]) 
+     
+    task_id = str(uuid.uuid4()) 
+    TASKS[task_id] = { 
+        "name": f"{script_type} [{model}]: {target_name}", 
+        "type": script_type, 
+        "status": "pending", 
+        "created_at": datetime.now().isoformat(), 
+        "ref_file": target_name 
+    } 
+  
+    asyncio.create_task(run_task_safely(task_id, cmd, x_api_key)) 
+    return {"status": "started", "task_id": task_id, "message": f"任务已加入执行队列: {script_name}"}
