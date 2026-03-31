@@ -70,7 +70,6 @@ StyleSync-Novel/                   # 项目根目录
 ├── novel_projects/                # 业务层：具体创作项目沙箱与分层 RAG 库
 ├── dictionaries/                  # 字典库（配置声明，未来扩展预留）
 └── text_testing_code/             # 测试代码区（配置声明，未来扩展预留）
-
 ## 五、 部署与运行环境配置
 本系统的环境搭建需满足 Python 3.9 及以上语言版本要求。
 
