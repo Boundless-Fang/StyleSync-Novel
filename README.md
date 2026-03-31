@@ -36,21 +36,40 @@
 ## 四、 物理目录与工程结构
 系统依赖预设的绝对路径结构进行数据流转与持久化存储：
 
-```text
-StyleSync-Novel/
-├── api/                           # 后端接口路由定义模块
-│   ├── routecore.py               # 核心模型服务与嵌入接口路由
-│   ├── routeproject.py            # 项目层级数据与文件管理路由
-│   └── routeworkflow.py           # 自动化任务流生命周期调度路由
-├── core/                          # 底层封装工具包
-│   ├── _core_llm.py               # 大语言模型同步/流式网络请求底层封装
-│   └── _core_rag.py               # FAISS 向量离线检索与相似度计算底层核心
-├── scripts/                       # 业务功能独立执行脚本
-│   ├── f0_local_vector_indexer.py # 全局检索库初始化构建
-│   ├── f1_... 到 f5_...           # 涵盖物理指标提取至正文生成的各个执行阶段
-├── reference_novels/              # 输入层：外部参考小说原著纯文本存储区
-├── text_style_imitation/          # 数据层：基于原著提取的特征文档与索引存储区
-└── novel_projects/                # 业务层：具体创作项目的执行工作台
+StyleSync-Novel/                   # 项目根目录
+# ==================== 静态代码仓库结构 (Git 追踪部分) ====================
+├── style_imitation_code/          # 【核心代码引擎大本营】
+│   ├── api/                       # 后端接口路由与任务管理
+│   │   ├── config.py / models.py / tasks.py # 配置、数据模型与并发任务管道
+│   │   ├── routecore.py           # 核心对话流与嵌入高速接口
+│   │   ├── routeproject.py        # 项目层级数据读写与沙箱隔离
+│   │   └── routeworkflow.py       # 自动化流水线生命周期调度
+│   ├── core/                      # 底层核心封装工具包
+│   │   ├── _core_config.py        # 底层路径与环境变量声明
+│   │   ├── _core_llm.py           # LLM 同步/流式网络请求底层
+│   │   ├── _core_rag.py           # FAISS 向量检索与代理编码机制
+│   │   └── _core_utils.py         # 包含 smart_read_text 的防灾文本解析器
+│   ├── frontend/                  # 前端静态资源目录
+│   │   └── index.html / app.js / style.css 
+│   ├── scripts/                   # 业务自动化独立执行脚本 (f0-f7)
+│   │   ├── f0_local_vector_indexer.py
+│   │   └── f1a_... 到 f5b_... 等
+│   ├── tools/                     # 工具箱脚本目录
+│   ├── main.py                    # FastAPI 主程序入口与服务挂载点
+│   ├── cs.py                      # 内部测试/占位脚本
+│   ├── test_api.py                # 硅基流动等三方 API 连通性测试脚本
+│   └── 0_readmd.txt               # 局部补充说明文档
+├── .gitignore                     # Git 忽略规则配置
+├── README.md                      # 项目基础开源说明
+├── requirements.txt               # Python 环境依赖清单
+├── 功能说明文档.txt               # 系统详细说明文档
+│
+# ==================== 动态运行生成结构 (代码执行后自动生成) ====================
+├── reference_novels/              # 输入层：外部参考小说原著文本存储区
+├── text_style_imitation/          # 数据层：全局文风特征文档与 RAG 索引存储区
+├── novel_projects/                # 业务层：具体创作项目沙箱与分层 RAG 库
+├── dictionaries/                  # 字典库（配置声明，未来扩展预留）
+└── text_testing_code/             # 测试代码区（配置声明，未来扩展预留）
 ```
 
 ## 五、 部署与运行环境配置
