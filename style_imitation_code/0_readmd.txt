@@ -1,0 +1,11 @@
+StyleSync-Novel/
+├── api/                           # 后端接口路由定义模块
+│   ├── routecore.py               # 核心模型服务与嵌入接口路由
+│   ├── routeproject.py            # 项目层级数据与文件管理路由
+│   └── routeworkflow.py           # 自动化任务流生命周期调度路由
+├── core/                          # 底层封装工具包
+│   ├── _core_llm.py               # 大语言模型同步/流式网络请求底层封装
+│   └── _core_rag.py               # FAISS 向量离线检索与相似度计算底层核心
+├── scripts/                       # 业务功能独立执行脚本
+    ├── f0_local_vector_indexer.py # 全局检索库初始化构建
+    └──f1_... 到 f5_...           # 涵盖物理指标提取至正文生成的各个执行阶段

@@ -1,23 +1,67 @@
-# --- File: routeproject.py ---
 import os
 import json
 import shutil
 from datetime import datetime
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from .config import STYLE_DIR, PROJ_DIR
 from .models import ProjectCreate, ChapterUpdate, AppendContent, SettingUpdate
 
 router = APIRouter()
 
-# 【新增辅助函数】：用来识别这是普通工程，还是文风库工程
+# ==========================================
+# 辅助函数与安全核心验证器
+# ==========================================
+
 def get_real_dir(proj_name: str):
+    """【内部解析】：用来识别这是普通工程，还是文风库工程"""
     if proj_name.startswith("style@@"):
         return os.path.join(STYLE_DIR, proj_name.replace("style@@", ""))
     return os.path.join(PROJ_DIR, proj_name)
 
-# --- 小说工作台项目管理 API ---
+def get_validated_target_path(proj_name: str, file_path: str) -> str:
+    """
+    【双重安全核心验证器】：
+    1. 防大本营劫持：严格校验 proj_name，确保 base_dir 被死死锁在合法沙箱内。
+    2. 防目录穿越：严格校验 file_path，确保目标文件不越权。
+    """
+    # ================= 阶段一：锁定并校验大本营 =================
+    raw_base_dir = get_real_dir(proj_name)
+    safe_base_dir = os.path.realpath(os.path.abspath(raw_base_dir))
+    
+    # 获取理论上合法的根沙箱路径
+    if proj_name.startswith("style@@"):
+        expected_root = os.path.realpath(os.path.abspath(STYLE_DIR))
+    else:
+        expected_root = os.path.realpath(os.path.abspath(PROJ_DIR))
+        
+    norm_root = os.path.normcase(expected_root)
+    norm_base = os.path.normcase(safe_base_dir)
+    
+    try:
+        if os.path.commonpath([norm_root, norm_base]) != norm_root:
+            raise HTTPException(status_code=403, detail="【系统拦截】：非法的项目名称越权访问！")
+    except ValueError:
+        raise HTTPException(status_code=403, detail="【系统拦截】：跨驱动器非法项目名称！")
+
+    # ================= 阶段二：锁定并校验目标文件 =================
+    target_path = os.path.realpath(os.path.abspath(os.path.join(safe_base_dir, file_path)))
+    norm_target = os.path.normcase(target_path)
+    
+    try:
+        if os.path.commonpath([norm_base, norm_target]) != norm_base:
+            raise ValueError("检测到非法的目录穿越尝试")
+    except ValueError as e:
+        raise HTTPException(status_code=403, detail=f"【系统拦截】：越权访问 ({str(e)})")
+        
+    return target_path
+
+
+# ==========================================
+# 小说工作台项目管理 API
+# ==========================================
+
 @router.get("/api/projects")
 async def get_projects():
     return [f for f in os.listdir(PROJ_DIR) if os.path.isdir(os.path.join(PROJ_DIR, f))]
@@ -123,7 +167,7 @@ async def get_chapters(proj_name: str):
 
 @router.get("/api/projects/{proj_name}/characters")
 async def get_characters(proj_name: str):
-    base_dir = get_real_dir(proj_name) # 改用真实路径
+    base_dir = get_real_dir(proj_name)
     char_dir = os.path.join(base_dir, "character_profiles")
     if not os.path.exists(char_dir):
         return []
@@ -164,28 +208,74 @@ async def append_to_novel(proj_name: str, req: AppendContent):
         f.write("\n\n" + req.content)
     return {"status": "success"}
 
+# ==========================================
+# 终极安全版设定读写接口 (重点升级部分)
+# ==========================================
+
 @router.get("/api/projects/{proj_name}/settings/{file_path:path}")
 async def get_project_setting(proj_name: str, file_path: str):
-    base_dir = get_real_dir(proj_name) # 改用真实路径
-    filepath = os.path.join(base_dir, file_path)
-    if os.path.exists(filepath):
-        with open(filepath, "r", encoding="utf-8") as f:
+    try:
+        # 调用核心验证器：一键完成双重清洗
+        target_path = get_validated_target_path(proj_name, file_path)
+    except HTTPException as e:
+        # GET 请求将拦截信息返回给前端编辑器显示
+        return {"content": e.detail}
+        
+    if not os.path.isfile(target_path):
+        return {"content": "文件不存在或尚未生成，请检查工作流执行状态。"}
+        
+    try:
+        with open(target_path, "r", encoding="utf-8") as f:
             return {"content": f.read()}
-    return {"content": "文件不存在或尚未生成，请检查工作流执行状态。"}
+    except Exception as e:
+        return {"content": f"系统错误：文件读取异常 ({str(e)})"}
 
 @router.put("/api/projects/{proj_name}/settings/{file_path:path}")
 async def update_project_setting(proj_name: str, file_path: str, update: SettingUpdate):
-    base_dir = get_real_dir(proj_name) # 改用真实路径
-    filepath = os.path.join(base_dir, file_path)
-    os.makedirs(os.path.dirname(filepath), exist_ok=True)
-    with open(filepath, "w", encoding="utf-8") as f:
-        f.write(update.content)
-    return {"status": "success"}
+    try:
+        # 复用核心验证器：一键完成双重清洗
+        target_path = get_validated_target_path(proj_name, file_path)
+    except HTTPException as e:
+        # 严禁伪装成 200 返回，必须抛出真实 HTTP 异常阻断非法写操作
+        raise e
+        
+    # 防御文件夹覆盖：防止直接对已存在的目录进行写文件操作引发崩溃
+    if os.path.isdir(target_path):
+        raise HTTPException(status_code=400, detail="【系统拦截】：目标路径已被文件夹占用，无法写入！")
+
+    try:
+        os.makedirs(os.path.dirname(target_path), exist_ok=True)
+        with open(target_path, "w", encoding="utf-8") as f:
+            f.write(update.content)
+        return {"status": "success"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"系统错误：文件写入异常 ({str(e)})")
+
+# ==========================================
+# 其他设定检索 API
+# ==========================================
 
 @router.get("/api/projects/{proj_name}/outlines")
 async def get_outlines(proj_name: str):
-    base_dir = get_real_dir(proj_name) # 改用真实路径
+    base_dir = get_real_dir(proj_name)
     outline_dir = os.path.join(base_dir, "chapter_structures")
     if not os.path.exists(outline_dir):
         return []
     return [f for f in os.listdir(outline_dir) if f.endswith(".md") or f.endswith(".json")]
+
+@router.get("/api/projects/{proj_name}/phase1_status") 
+async def check_phase1_status(proj_name: str): 
+    """检测 f0-f3b (世界观) 是否已生成""" 
+    base_dir = get_real_dir(proj_name) 
+    target_file = os.path.join(base_dir, "world_settings.md" ) 
+    is_done = os.path.exists(target_file) and os.path.getsize(target_file) > 50 
+    return {"is_done" : is_done} 
+ 
+@router.get("/api/projects/{proj_name}/prompts") 
+async def get_prompts(proj_name: str): 
+    """供知识库获取 prompt 指令列表""" 
+    base_dir = get_real_dir(proj_name) 
+    prompt_dir = os.path.join(base_dir, "chapter_specific_prompts" ) 
+    if not os.path.exists(prompt_dir): 
+        return [] 
+    return [f for f in os.listdir(prompt_dir) if f.endswith(".txt" )]
