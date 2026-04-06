@@ -1,3 +1,4 @@
+# --- File: scripts/f2a_local_word_freq.py ---
 import os
 import math
 import argparse
@@ -9,6 +10,14 @@ import jieba
 # 1. 跨目录寻址：将父目录(style_imitation_code)加入环境变量
 # =====================================================================
 import sys
+from core._core_gui_runner import safe_run_app
+
+try:
+    import tkinter as tk
+    from tkinter import ttk, filedialog, messagebox
+except ImportError:
+    tk = None
+    ttk = None
 current_dir = os.path.dirname(os.path.abspath(__file__)) # 指向 scripts/
 parent_dir = os.path.dirname(current_dir)                # 指向 style_imitation_code/
 if parent_dir not in sys.path:
@@ -18,7 +27,7 @@ if parent_dir not in sys.path:
 # 2. 导入 core 模块 (注意加 core. 前缀)
 # =====================================================================
 from core._core_config import BASE_DIR, PROJECT_ROOT, REFERENCE_DIR, STYLE_DIR, PROJ_DIR
-from core._core_utils import smart_read_text
+from core._core_utils import smart_read_text, atomic_write
 
 PUNCTUATIONS = set("，。！？；：“”‘’（）【】《》、\n\r \t.!?,-[]")
 
@@ -57,12 +66,12 @@ class WordFreqAnalyzerApp:
         self.entry_manual = ttk.Entry(frame_settings, textvariable=self.manual_var, state="disabled", width=10)
         self.entry_manual.grid(row=2, column=1, sticky="w", padx=5, pady=5)
 
-        self.btn_run = ttk.Button(self.root, text="▶ 开始提取高频词", command=self.start_processing)
+        self.btn_run = ttk.Button(self.root, text="开始提取高频词", command=self.start_processing)
         self.btn_run.pack(pady=10)
 
         self.log_text = tk.Text(self.root, height=8, width=65, state="disabled", bg="#f8f9fa")
         self.log_text.pack(padx=10, pady=5)
-        self.log("系统就绪。")
+        self.log("系统就绪。已启用流式分块统计机制，保障低配机器的内存安全。")
 
     def toggle_entry(self):
         self.entry_manual.config(state="normal" if self.top_n_mode.get() == 2 else "disabled")
@@ -100,24 +109,36 @@ class WordFreqAnalyzerApp:
             self.log(f"开始提取《{novel_name}》的高频词...")
             report = []
             
-            words = jieba.lcut(content)
-            valid_words = [w for w in words if w.strip() and w not in PUNCTUATIONS]
+            # 【核心优化】：分块提取替代全量提取
+            chunk_size = 50000
+            word_counts = Counter()
+            total_valid_count = 0
             
-            if len(valid_words) <= 1:
+            for i in range(0, len(content), chunk_size):
+                chunk = content[i:i+chunk_size]
+                chunk_valid_words = []
+                for w in jieba.cut(chunk):
+                    w = w.strip()
+                    if w and w not in PUNCTUATIONS:
+                        chunk_valid_words.append(w)
+                word_counts.update(chunk_valid_words)
+                total_valid_count += len(chunk_valid_words)
+            
+            if total_valid_count <= 1:
                 self.log("文本过少，无法提取。")
                 return
 
             if self.top_n_mode.get() == 1:
-                unique = len(set(valid_words))
-                log_ttr = math.log10(unique) / math.log10(len(valid_words)) if len(valid_words) > 1 else 0
-                calc_n = int(50 * log_ttr * (len(valid_words) ** (1/3.0))) if len(valid_words) > 1 else 100
+                unique = len(word_counts)
+                log_ttr = math.log10(unique) / math.log10(total_valid_count) if total_valid_count > 1 else 0
+                calc_n = int(50 * log_ttr * (total_valid_count ** (1/3.0))) if total_valid_count > 1 else 100
                 top_n = max(100, min(8000, calc_n))
                 self.log(f"动态算法建议提取量: Top {top_n}")
             else:
                 top_n = int(self.manual_var.get())
                 self.log(f"手动提取量: Top {top_n}")
 
-            counts = Counter(valid_words).most_common(top_n)
+            counts = word_counts.most_common(top_n)
             report.append(f"【高频词列表 (提取前 {top_n} 个)】\n" + "-"*40)
             
             for i in range(0, len(counts), 5):
@@ -125,58 +146,55 @@ class WordFreqAnalyzerApp:
                 report.append("  ".join([f"{w}({c})" for w, c in chunk]))
 
             save_path = os.path.join(out_dir, "高频词.txt")
-            with open(save_path, 'w', encoding='utf-8') as f:
-                f.write("\n".join(report))
+            atomic_write(save_path, "\n".join(report), data_type='text')
 
-            self.log(f"✅ 提取完成！已保存至: {save_path}")
+            self.log(f"[INFO] 提取完成！已保存至: {save_path}")
         except Exception as e:
             self.log(f"错误: {str(e)}")
         finally:
             self.btn_run.config(state="normal")
 
-def run_headless(file_path):
+def run_headless(target_file):
     import sys
-    if not os.path.exists(file_path):
+    if not os.path.exists(target_file):
         sys.exit(1)
         
-    content = smart_read_text(file_path)
-    novel_name = os.path.splitext(os.path.basename(file_path))[0]
+    content = smart_read_text(target_file)
+    novel_name = os.path.splitext(os.path.basename(target_file))[0]
     out_dir = os.path.join(STYLE_DIR, f"{novel_name}_style_imitation", "statistics")
     os.makedirs(out_dir, exist_ok=True)
 
-    words = jieba.lcut(content)
-    valid_words = [w for w in words if w.strip() and w not in PUNCTUATIONS]
-    if len(valid_words) <= 1: 
+    # 【核心优化】：静默模式同样应用分块与生成器更新
+    chunk_size = 50000
+    word_counts = Counter()
+    total_valid_count = 0
+    
+    for i in range(0, len(content), chunk_size):
+        chunk = content[i:i+chunk_size]
+        chunk_valid_words = []
+        for w in jieba.cut(chunk):
+            w = w.strip()
+            if w and w not in PUNCTUATIONS:
+                chunk_valid_words.append(w)
+        word_counts.update(chunk_valid_words)
+        total_valid_count += len(chunk_valid_words)
+
+    if total_valid_count <= 1: 
         sys.exit(0)
 
-    unique = len(set(valid_words))
-    log_ttr = math.log10(unique) / math.log10(len(valid_words)) if len(valid_words) > 1 else 0
-    top_n = max(100, min(8000, int(50 * log_ttr * (len(valid_words) ** (1/3.0)))))
+    unique = len(word_counts)
+    log_ttr = math.log10(unique) / math.log10(total_valid_count) if total_valid_count > 1 else 0
+    top_n = max(100, min(8000, int(50 * log_ttr * (total_valid_count ** (1/3.0)))))
 
-    counts = Counter(valid_words).most_common(top_n)
+    counts = word_counts.most_common(top_n)
     report = [f"【高频词列表 (提取前 {top_n} 个)】\n" + "-"*40]
     
     for i in range(0, len(counts), 5):
         chunk = counts[i:i + 5]
         report.append("  ".join([f"{w}({c})" for w, c in chunk]))
 
-    with open(os.path.join(out_dir, "高频词.txt"), 'w', encoding='utf-8') as f:
-        f.write("\n".join(report))
+    save_path = os.path.join(out_dir, "高频词.txt")
+    atomic_write(save_path, "\n".join(report), data_type='text')
 
 if __name__ == "__main__":
-    import sys
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--target_file", type=str, default="")
-    parser.add_argument("--project", type=str, default="") 
-    args, unknown = parser.parse_known_args()
-    
-    if not args.target_file and len(sys.argv) == 1:
-        import tkinter as tk
-        from tkinter import ttk, filedialog, messagebox
-        root = tk.Tk()
-        app = WordFreqAnalyzerApp(root)
-        root.mainloop()
-    else:
-        if not args.target_file and unknown and not unknown[0].startswith('--'):
-            args.target_file = unknown[0]
-        run_headless(args.target_file)
+    safe_run_app(app_class=WordFreqAnalyzerApp, headless_func=run_headless, target_file="")

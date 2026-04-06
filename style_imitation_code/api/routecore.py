@@ -23,8 +23,11 @@ class EmbedRequest(BaseModel):
 def internal_embed(req: EmbedRequest):
     """供本地子进程调用的内部向量化高速接口 (安全容错版)"""
     
-    # 优先读环境变量，读不到就用你填写的真实 Key
-    EMBEDDING_API_KEY = os.environ.get("EMBEDDING_API_KEY", "sk-blrjxqvjrjpefkruqufxqyoiitfpaflpyhgxtv")
+    # 统一使用 SILICONFLOW_API_KEY
+    EMBEDDING_API_KEY = os.environ.get("SILICONFLOW_API_KEY")
+    
+    if not EMBEDDING_API_KEY:
+        raise HTTPException(status_code=500, detail="【系统拦截】未配置硅基流动 API Key，拒绝请求。")
     # 注意加上了 /embeddings 后缀
     EMBEDDING_BASE_URL = "https://api.siliconflow.cn/v1/embeddings"
     
@@ -47,10 +50,10 @@ def internal_embed(req: EmbedRequest):
         
         # 状态码拦截与官方真实报错打印
         if response.status_code != 200:
-            print("\n" + "🔥"*25)
-            print(f"🔴 硅基流动官方拒绝了请求！状态码: {response.status_code}")
+            print("\n" + "="*50)
+            print(f"[ERROR] 硅基流动官方拒绝了请求！状态码: {response.status_code}")
             print(f"官方报错原文: {response.text}")
-            print("🔥"*25 + "\n")
+            print("="*50 + "\n")
             raise HTTPException(status_code=500, detail=f"API 报错: {response.text}")
         
         data = response.json()
@@ -60,7 +63,7 @@ def internal_embed(req: EmbedRequest):
         
     except Exception as e:
         print("\n" + "="*50)
-        print("🔴 请求发生代码级异常或网络超时：")
+        print("[ERROR] 请求发生代码级异常或网络超时：")
         traceback.print_exc()
         print("="*50 + "\n")
         raise HTTPException(status_code=500, detail=str(e))

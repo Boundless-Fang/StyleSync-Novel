@@ -7,6 +7,14 @@ import threading
 # 1. 跨目录寻址：将父目录(style_imitation_code)加入环境变量
 # =====================================================================
 import sys
+from core._core_gui_runner import safe_run_app
+
+try:
+    import tkinter as tk
+    from tkinter import ttk, filedialog, messagebox
+except ImportError:
+    tk = None
+    ttk = None
 current_dir = os.path.dirname(os.path.abspath(__file__)) # 指向 scripts/
 parent_dir = os.path.dirname(current_dir)                # 指向 style_imitation_code/
 if parent_dir not in sys.path:
@@ -16,7 +24,7 @@ if parent_dir not in sys.path:
 # 2. 导入 core 模块 (注意加 core. 前缀)
 # =====================================================================
 from core._core_config import BASE_DIR, PROJECT_ROOT, REFERENCE_DIR, STYLE_DIR, PROJ_DIR
-from core._core_utils import smart_read_text
+from core._core_utils import smart_read_text, atomic_write
 from core._core_llm import call_deepseek_api
 
 class StyleAnalysisApp:
@@ -42,7 +50,7 @@ class StyleAnalysisApp:
         ttk.Radiobutton(frame_model, text="DeepSeek V3 (标准)", variable=self.model_var, value="deepseek-chat").pack(side=tk.LEFT, padx=10, pady=5)
         ttk.Radiobutton(frame_model, text="DeepSeek R1 (推理)", variable=self.model_var, value="deepseek-reasoner").pack(side=tk.LEFT, padx=10, pady=5)
 
-        self.btn_process = ttk.Button(self.root, text="▶ 开始提取文风特征", command=self.start_process_thread)
+        self.btn_process = ttk.Button(self.root, text="开始提取文风特征", command=self.start_process_thread)
         self.btn_process.pack(pady=10)
 
         self.log_text = tk.Text(self.root, height=8, width=75, state="disabled", bg="#f8f9fa")
@@ -157,19 +165,20 @@ class StyleAnalysisApp:
             
             final_output = f"{analysis_result}\n\n{prompt_part_2}"
             
-            with open(save_path, 'w', encoding='utf-8') as f:
-                f.write(final_output)
-            
-            msg = f"✅ 分析与拼接完成！最终设定文件已落盘至: {save_path}"
-            if project_save_path:
-                shutil.copy2(save_path, project_save_path)
-                msg += f"\n已同步备份至项目目录: {project_save_path}"
-                
-            log_func(msg)
+            try:
+                atomic_write(save_path, final_output, data_type='text')
+                msg = f"[INFO] 分析与拼接完成！最终设定文件已原子级落盘至: {save_path}"
+                if project_save_path:
+                    shutil.copy2(save_path, project_save_path)
+                    msg += f"\n已同步备份至项目目录: {project_save_path}"
+                log_func(msg)
+            except Exception as e:
+                log_func(f"[ERROR] 文件写入失败: {e}")
+                raise
             return True
 
         except Exception as e:
-            log_func(f"❌ 分析失败: {str(e)}")
+            log_func(f"[ERROR] 分析失败: {str(e)}")
             import traceback
             traceback.print_exc()
             return False
@@ -202,22 +211,10 @@ def run_headless(target_file, project_name=None, model="deepseek-chat"):
         sys.exit(1)
 
 if __name__ == "__main__":
-    import sys
-    parser = argparse.ArgumentParser(description="大模型深层文风特征提取")
-    parser.add_argument("--target_file", type=str, help="参考小说原文的绝对路径或文件名", default="")
-    parser.add_argument("--project", type=str, help="绑定的项目名称", default="")
-    parser.add_argument("--model", type=str, help="使用的模型名称", default="deepseek-chat")
-    
-    args, unknown = parser.parse_known_args()
-    
-    if not args.target_file and len(sys.argv) == 1:
-        import tkinter as tk
-        from tkinter import ttk, filedialog, messagebox
-        root = tk.Tk()
-        app = StyleAnalysisApp(root)
-        root.mainloop()
-    else:
-        if not args.target_file and unknown and not unknown[0].startswith('--'):
-            args.target_file = unknown[0]
-            
-        run_headless(args.target_file, args.project, args.model)
+    safe_run_app(
+        app_class=StyleAnalysisApp,
+        headless_func=run_headless,
+        target_file="",
+        project_name="",
+        model=""
+    )

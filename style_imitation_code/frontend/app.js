@@ -33,12 +33,14 @@ createApp({
         const saveStatus = ref('已保存');
         let saveTimeout = null;
 
+
         // 自动化工作流参数
         const references = ref([]);
         const selectedReference = ref('');
         
         // 自动流水线模式参数
         const styleExtractMode = ref('auto');
+        const forceOverwrite = ref(false); // 新增：全局强制覆盖开关
         const autoPipelineType = ref('fanfic');
         const autoStyleCharNames = ref('');
         const isAutoRunning = ref(false);
@@ -308,7 +310,7 @@ createApp({
                         
                         if (matchCount >= config.value.forbiddenTolerance) {
                             stopGeneration();
-                            aiMessage.versions[aiMessage.active_version].content += '\n\n<div class="p-3 bg-red-100 text-red-700 rounded border border-red-300 mt-2 font-bold"><i class="fa-solid fa-triangle-exclamation"></i> 🛑 内容触发安全拦截机制：敏感词命中次数 (' + matchCount + ') 已达上限。</div>';
+                            aiMessage.versions[aiMessage.active_version].content += '\n\n<div class="p-3 bg-red-100 text-red-700 rounded border border-red-300 mt-2 font-bold"><i class="fa-solid fa-triangle-exclamation"></i> 内容触发安全拦截机制：敏感词命中次数 (' + matchCount + ') 已达上限。</div>';
                             break;
                         }
                     }
@@ -326,11 +328,19 @@ createApp({
 
         const renderMarkdown = (text) => {
             if (!text) return '';
-            let parsed = marked.parse(text);
+            
+            // 1. 将 Markdown 解析为 HTML
+            let parsedHtml = marked.parse(text);
+            
+            // 2. 【核心修复】：使用 DOMPurify 清洗危险标签 (防 XSS 注入)
+            parsedHtml = DOMPurify.sanitize(parsedHtml);
+            
+            // 3. 处理敏感词高亮
             if (forbiddenRegex.value) {
-                parsed = parsed.replace(forbiddenRegex.value, '<span class="forbidden-highlight">$1</span>');
+                parsedHtml = parsedHtml.replace(forbiddenRegex.value, '<span class="forbidden-highlight">$1</span>');
             }
-            return parsed;
+            
+            return parsedHtml;
         };
 
         const loadProjects = async () => {
@@ -342,58 +352,124 @@ createApp({
                 fetchProjectCharacters();
             }
         };
-        const fetchChapters = async () => {
-            if(!currentProject.value) return;
-            const res = await fetch(`/api/projects/${currentProject.value}/chapters`);
-            chapters.value = await res.json();
-            if(chapters.value.length) {
-                currentChapter.value = chapters.value[0];
-                fetchContent();
-            } else { currentChapter.value = ''; editorContent.value = ''; }
-        };
-        const fetchProjectCharacters = async () => {
-            if(!currentProject.value) return;
-            try {
-                const res = await fetch(`/api/projects/${currentProject.value}/characters`);
-                projectCharacters.value = await res.json();
-            } catch(e) { console.error(e); }
-        };
+        // ======= 新建章节弹窗状态与逻辑 ======= 
+        const showChapterModal = ref(false); 
+        const newChapterNum = ref(1); 
+        const newChapterTitle = ref(''); 
 
-        // 🚨 【核心修复1】：去除 .txt 后缀，防止后端拼接成 .txt.txt
-        const fetchContent = async () => {
-            if(!currentProject.value || !currentChapter.value) return;
+        const getChapterNumber = (name) => { 
+            let arabicMatch = name.match(/\d+/); 
+            if (arabicMatch) return parseInt(arabicMatch[0]); 
+  
+            let cnMatch = name.match(/第([零一二两三四五六七八九十百千万]+)[章回节卷]/); 
+            if (cnMatch) { 
+                const cnNum = cnMatch[1]; 
+                const cnMap = { '零':0, '一':1, '二':2, '两':2, '三':3, '四':4, '五':5, '六':6, '七':7, '八':8, '九':9 }; 
+                const cnUnits = { '十':10, '百':100, '千':1000, '万':10000 }; 
+                 
+                let result = 0; 
+                let tmp = 0; 
+                for (let i = 0; i < cnNum.length; i++) { 
+                    let char = cnNum[i]; 
+                    if (cnUnits[char]) { 
+                        let unit = cnUnits[char]; 
+                        if (tmp === 0 && unit === 10) tmp = 1; 
+                        result += tmp * unit; 
+                        tmp = 0; 
+                    } else { 
+                        tmp = cnMap[char] || 0; 
+                    } 
+                } 
+                result += tmp; 
+                return result; 
+            } 
+            return 999999; 
+        }; 
+
+        const fetchChapters = async () => { 
+            if(!currentProject.value) return; 
+            const res = await fetch(`/api/projects/${currentProject.value}/chapters`); 
+            let rawChapters = await res.json(); 
+            
+            rawChapters.sort((a, b) => getChapterNumber(a) - getChapterNumber(b)); 
+            chapters.value = rawChapters; 
+            
+            if(chapters.value.length) { 
+                if (!currentChapter.value || !chapters.value.includes(currentChapter.value)) { 
+                    currentChapter.value = chapters.value[chapters.value.length - 1]; 
+                } 
+                fetchContent(); 
+            } else { currentChapter.value = ''; editorContent.value = ''; } 
+        }; 
+
+        const fetchProjectCharacters = async () => { 
+            if(!currentProject.value) return; 
+            try { 
+                const res = await fetch(`/api/projects/${currentProject.value}/characters`); 
+                projectCharacters.value = await res.json(); 
+            } catch(e) { console.error(e); } 
+        }; 
+
+        const fetchContent = async () => { 
+            if(!currentProject.value || !currentChapter.value) return; 
             const cleanName = currentChapter.value.replace('.txt', ''); 
-            const res = await fetch(`/api/projects/${currentProject.value}/chapters/${cleanName}/content`);
-            const data = await res.json();
-            editorContent.value = data.content;
-            saveStatus.value = '已同步';
-        };
+            const res = await fetch(`/api/projects/${currentProject.value}/chapters/${cleanName}/content`); 
+            const data = await res.json(); 
+            editorContent.value = data.content; 
+            saveStatus.value = '已同步'; 
+        }; 
 
-        // 🚨 【核心修复2】：保存时也去除 .txt 后缀
-        const debouncedSave = () => {
-            saveStatus.value = '修改侦测中...';
-            clearTimeout(saveTimeout);
-            saveTimeout = setTimeout(async () => {
-                if(!currentProject.value || !currentChapter.value) return;
-                saveStatus.value = '执行落盘...';
-                const cleanName = currentChapter.value.replace('.txt', '');
-                await fetch(`/api/projects/${currentProject.value}/chapters/${cleanName}/content`, {
-                    method: 'PUT', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ content: editorContent.value })
-                });
-                saveStatus.value = '已保存';
-            }, 1000);
-        };
+        const debouncedSave = () => { 
+            saveStatus.value = '修改侦测中...'; 
+            clearTimeout(saveTimeout); 
+            saveTimeout = setTimeout(async () => { 
+                if(!currentProject.value || !currentChapter.value) return; 
+                saveStatus.value = '执行落盘...'; 
+                const cleanName = currentChapter.value.replace('.txt', ''); 
+                await fetch(`/api/projects/${currentProject.value}/chapters/${cleanName}/content`, { 
+                    method: 'PUT', headers: { 'Content-Type': 'application/json' }, 
+                    body: JSON.stringify({ content: editorContent.value }) 
+                }); 
+                saveStatus.value = '已保存'; 
+            }, 1000); 
+        }; 
 
-        const addChapter = async () => {
-            const name = prompt("请输入预生成章节名称 (不需加后缀)：", "新章节");
-            if(name && name.trim()) {
-                await fetch(`/api/projects/${currentProject.value}/chapters/${name.trim()}`, { method: 'POST' });
-                await fetchChapters();
-                currentChapter.value = name.trim() + '.txt';
-                fetchContent();
-            }
-        };
+        const openCreateModal = () => { 
+            if (!currentProject.value) { 
+                alert("请先选择一个目标项目。"); 
+                return; 
+            } 
+            let maxNum = 0; 
+            chapters.value.forEach(c => { 
+                let num = getChapterNumber(c); 
+                if(num !== 9999 && num !== 999 && num > maxNum) maxNum = num; 
+            }); 
+            newChapterNum.value = maxNum + 1; 
+            newChapterTitle.value = ''; 
+            showChapterModal.value = true; 
+        }; 
+
+        const confirmCreateChapter = async () => { 
+            let finalName = `第${newChapterNum.value}章`; 
+            if (newChapterTitle.value.trim()) { 
+                finalName += `_${newChapterTitle.value.trim()}`; 
+            } 
+
+            try { 
+                const res = await fetch(`/api/projects/${currentProject.value}/chapters/${finalName}`, { method: 'POST' }); 
+                if (res.ok) { 
+                    await fetchChapters(); 
+                    currentChapter.value = finalName + '.txt'; 
+                    workflowChapterSelect.value = finalName; 
+                    workflowChapterName.value = finalName; 
+                    showChapterModal.value = false; 
+                } else { 
+                    alert("创建失败，请检查后端状态。"); 
+                } 
+            } catch (e) { 
+                alert(`请求异常: ${e.message}`); 
+            } 
+        }; 
         const renameChapter = async () => {
             const oldName = currentChapter.value.replace('.txt', '');
             const name = prompt("覆写原章节名：", oldName);
@@ -413,6 +489,35 @@ createApp({
                 if(activeTab.value === 'editor') fetchContent();
                 alert('导入已执行。');
             } catch(e) { alert('数据流追加引发异常。'); }
+        };
+
+        // 工作流专用：新建空白章节
+        const addChapterFromWorkflow = async () => {
+            if (!currentProject.value) {
+                alert("请先选择一个目标项目。");
+                return;
+            }
+            
+            let name = workflowChapterName.value.trim();
+            if (!name) {
+                name = prompt("请输入预生成章节名称 (不需加后缀)：", "新章节");
+                if (!name || !name.trim()) return;
+                name = name.trim();
+            }
+
+            try {
+                const res = await fetch(`/api/projects/${currentProject.value}/chapters/${name}`, { method: 'POST' });
+                if (res.ok) {
+                    await fetchChapters();
+                    workflowChapterSelect.value = name;
+                    workflowChapterName.value = name;
+                    alert(`章节 [${name}] 已在底层创建成功！`);
+                } else {
+                    alert("创建失败，请检查后端状态。");
+                }
+            } catch (e) {
+                alert(`请求异常: ${e.message}`);
+            }
         };
 
         const loadReferences = async () => {
@@ -464,40 +569,44 @@ createApp({
             }
         };
 
-        const waitForTask = (taskId) => {
-            return new Promise((resolve, reject) => {
-                const check = async () => {
-                    if (cancelAutoFlag.value) {
-                        reject(new Error('用户手动终止了流水线'));
-                        return;
-                    }
-                    try {
-                        const res = await fetch(`/api/tasks/${taskId}`);
-                        if (res.ok) {
-                            const task = await res.json();
-                            if (task.status === 'success') {
-                                resolve(task);
-                            } else if (task.status === 'failed' || task.status === 'error') {
-                                reject(new Error(task.error || task.stderr || '任务执行失败'));
-                            } else {
-                                setTimeout(check, 2000); 
-                            }
-                        } else {
-                            reject(new Error('无法获取任务状态'));
-                        }
-                    } catch (e) {
-                        setTimeout(check, 2000);
-                    }
-                };
-                check();
-            });
-        };
+        const waitForTask = (taskId) =>  { 
+            return new Promise((resolve, reject) =>  { 
+                const check = async  () => { 
+                    if  (cancelAutoFlag.value) { 
+                        reject(new Error('用户手动终止了流水线' )); 
+                        return ; 
+                    } 
+                    try  { 
+                        const res = await fetch(`/api/tasks/${taskId}` ); 
+                        if  (res.ok) { 
+                            const task = await  res.json(); 
+                            if (task.status === 'success' ) { 
+                                resolve(task); 
+                            } else if (task.status === 'failed' || task.status === 'error' ) { 
+                                reject(new Error(task.error || task.stderr || '任务执行失败' )); 
+                            } else  { 
+                                setTimeout(check, 2000 ); 
+                            } 
+                        } else if (res.status === 404 ) { 
+                            // 防线五：精准捕获后端淘汰清理信号，斩断死循环 
+                            reject(new Error('系统拦截：任务记录已被物理清理或进程已丢失。' )); 
+                        } else  { 
+                            // 兼容 502/504 等网络波动 
+                            setTimeout(check, 2000 ); 
+                        } 
+                    } catch  (e) { 
+                        setTimeout(check, 2000 ); 
+                    } 
+                }; 
+                check(); 
+            }); 
+        }; 
 
         const executePipelineStep = async (step, customChar = null) => {
             if (cancelAutoFlag.value) throw new Error("用户手动终止了流水线");
             autoRunProgress.value = `${step.script} - ${step.name}`;
             
-            let url = `/api/scripts/${step.script}?target_file=${encodeURIComponent(selectedReference.value)}`;
+            let url = `/api/scripts/${step.script}?target_file=${encodeURIComponent(selectedReference.value)}&force=${forceOverwrite.value}`;
             
             if (['f1b', 'f2b', 'f3a', 'f3b', 'f3c'].includes(step.script)) {
                 url += `&model=${workflowStyleModel.value}`;
@@ -518,7 +627,7 @@ createApp({
             await pollTasks();
         };
 
-        // 🚨 【还原修改】：原版优美的一键执行流水线逻辑
+        // 【还原修改】：原版优美的一键执行流水线逻辑
         const runStyleScriptAuto = async () => {
             if (!selectedReference.value) { alert("请先选择参考原著文件。"); return; }
             
@@ -550,17 +659,17 @@ createApp({
                     // 只暂停，不再自动加载名单，等用户自己点按钮
                     autoRunProgress.value = "等待人工干预：点击获取角色并确认";
                     isAutoPaused.value = true;
-                    alert("✅ 前置设定 (f0-f3b) 已提取完成！请在下方点击【获取推荐名单】按钮。");
+                    alert("前置设定 (f0-f3b) 已提取完成！请在下方点击【获取推荐名单】按钮。");
                 } else {
-                    alert("✅ 模仿模式：基础文风提取流水线执行完成！");
+                    alert("模仿模式：基础文风提取流水线执行完成！");
                     isAutoRunning.value = false;
                     autoRunProgress.value = '';
                 }
             } catch (e) {
                 if (e.message.includes('手动终止')) {
-                    alert("🛑 已成功终止流水线任务队列。");
+                    alert("已成功终止流水线任务队列。");
                 } else {
-                    alert(`❌ 流水线执行中断或遇到错误: ${e.message}`);
+                    alert(`流水线执行中断或遇到错误: ${e.message}`);
                 }
                 isAutoRunning.value = false;
                 isAutoPaused.value = false;
@@ -580,12 +689,12 @@ createApp({
                 }
                 await executePipelineStep({ script: 'f4b', name: '剧情动态压缩建库' });
                 
-                alert("✅ 同人模式：文风提取与仿写数据流构建全部执行完成！");
+                alert("同人模式：文风提取与仿写数据流构建全部执行完成！");
             } catch(e) {
                 if (e.message.includes('手动终止')) {
-                    alert("🛑 已成功终止流水线任务队列。");
+                    alert("已成功终止流水线任务队列。");
                 } else {
-                    alert(`❌ 后半段流水线中断: ${e.message}`);
+                    alert(`后半段流水线中断: ${e.message}`);
                 }
             } finally {
                 isAutoRunning.value = false;
@@ -675,7 +784,7 @@ createApp({
                     return; 
                 }
                 
-                // 🚨 【核心修复3】：死等 f5b 写完，然后刷新编辑器
+                // 【核心修复3】：死等 f5b 写完，然后刷新编辑器
                 if (data.task_id) {
                     alert("小说生成任务已提交后台执行，完成后将自动同步到编辑器！");
                     await waitForTask(data.task_id); 
@@ -683,7 +792,7 @@ createApp({
                     await fetchChapters(); 
                     currentChapter.value = workflowChapterName.value.replace('.txt', '') + '.txt';
                     await fetchContent(); 
-                    alert("✅ 章节正文生成完成！已同步显示在左侧编辑器中。");
+                    alert("章节正文生成完成！已同步显示在左侧编辑器中。");
                 }
                 await pollTasks();
                 return;
@@ -704,7 +813,7 @@ createApp({
         const runStyleScript = async () => {
             if (!selectedReference.value) { alert("请先选择参考原著文件。"); return; }
             
-            let url = `/api/scripts/${workflowStyleScript.value}?target_file=${encodeURIComponent(selectedReference.value)}&force=true`;
+            let url = `/api/scripts/${workflowStyleScript.value}?target_file=${encodeURIComponent(selectedReference.value)}&force=${forceOverwrite.value}`;
             if (['f1b', 'f2b', 'f3a', 'f3b', 'f3c'].includes(workflowStyleScript.value)) {
                 url += `&model=${workflowStyleModel.value}`;
             }
@@ -819,15 +928,16 @@ createApp({
             references, selectedReference, projectActionMode, newProjectName, existingProjectSelect, workflowCharName,
             kbProject, kbSelectedFile, kbContent, taskList, showAllTasks, visibleTasks, kbType, kbItems,
             createNewChat, copyCurrentChat, clearCurrentChatMessages, sendMessage, stopGeneration, renderMarkdown,
-            fetchChapters, fetchContent, debouncedSave, addChapter, renameChapter, importToNovel,
+            fetchChapters, fetchContent, debouncedSave, renameChapter, importToNovel,
             runProjectScript, runStyleScript, createProject, fetchKbFilesList, fetchKbContent, saveKbContent,
+            showChapterModal, newChapterNum, newChapterTitle, openCreateModal, confirmCreateChapter,
             workflowProjectModel, workflowStyleModel, workflowProjectScript, workflowStyleScript, newProjectBranch, newProjectReferenceStyle, availableStyles,
             workflowChapterName, workflowChapterSelect, workflowChapterBrief, workflowF4aMode, workflowF4aInput, projectCharacters, workflowCharSelect, f4aChar, f4aWorldview,
             fileInput, uploadFileName, handleFileUpload, submitUpload, loadReferences,
             
             recommendedChars, freqChars, customCharInput, showCharSelector, isLoadingChars, loadCharacterSuggestions,
             
-            styleExtractMode, autoPipelineType, autoStyleCharNames, isAutoRunning, autoRunProgress,
+            styleExtractMode, forceOverwrite, autoPipelineType, autoStyleCharNames, isAutoRunning, autoRunProgress,
             isAutoPaused, cancelAutoFlag, stopAutoPipeline, runStyleScriptAuto, continueAutoPipeline
         };
     }

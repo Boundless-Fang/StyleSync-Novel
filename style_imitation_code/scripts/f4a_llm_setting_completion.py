@@ -7,6 +7,14 @@ import threading
 # 1. 跨目录寻址：将父目录(style_imitation_code)加入环境变量
 # =====================================================================
 import sys
+from core._core_gui_runner import safe_run_app
+
+try:
+    import tkinter as tk
+    from tkinter import ttk, filedialog, messagebox
+except ImportError:
+    tk = None
+    ttk = None
 current_dir = os.path.dirname(os.path.abspath(__file__)) # 指向 scripts/
 parent_dir = os.path.dirname(current_dir)                # 指向 style_imitation_code/
 if parent_dir not in sys.path:
@@ -17,6 +25,7 @@ if parent_dir not in sys.path:
 # =====================================================================
 from core._core_config import BASE_DIR, PROJECT_ROOT, REFERENCE_DIR, STYLE_DIR, PROJ_DIR
 from core._core_llm import call_deepseek_api
+from core._core_utils import atomic_write
 from core._core_rag import RAGRetriever
 
 class SettingCompletionApp:
@@ -71,7 +80,7 @@ class SettingCompletionApp:
             self.wv_vars[key] = var
             ttk.Entry(frame, textvariable=var, width=60).grid(row=i, column=1, padx=5, pady=4)
             
-        ttk.Button(frame, text="▶ 执行世界观补全", command=lambda: self.start_process("worldview")).grid(row=len(fields), column=1, sticky="e", pady=10)
+        ttk.Button(frame, text="执行世界观补全", command=lambda: self.start_process("worldview")).grid(row=len(fields), column=1, sticky="e", pady=10)
 
     def build_character_tab(self):
         frame = ttk.Frame(self.notebook)
@@ -102,7 +111,7 @@ class SettingCompletionApp:
         self.char_vars["attitude"] = tk.StringVar()
         ttk.Entry(frame, textvariable=self.char_vars["attitude"], width=50).grid(row=10, column=1, sticky="w", pady=2)
 
-        ttk.Button(frame, text="▶ 执行角色卡补全", command=lambda: self.start_process("character")).grid(row=11, column=1, sticky="e", pady=10)
+        ttk.Button(frame, text="执行角色卡补全", command=lambda: self.start_process("character")).grid(row=11, column=1, sticky="e", pady=10)
 
     def log(self, message):
         self.log_text.config(state="normal")
@@ -154,7 +163,7 @@ class SettingCompletionApp:
             os.makedirs(target_dir, exist_ok=True)
 
         if not original_path:
-             log_func("❌ 错误：未提供参考原文路径，无法定位 RAG 索引。")
+             log_func("[ERROR] 错误：未提供参考原文路径，无法定位 RAG 索引。")
              return False
              
         novel_name = os.path.splitext(os.path.basename(original_path))[0]
@@ -166,7 +175,7 @@ class SettingCompletionApp:
         chunks_path = os.path.join(rag_db_dir, "chunks.json")
 
         if not os.path.exists(index_path) or not os.path.exists(chunks_path):
-             log_func("❌ 致命错误：未找到全局 RAG 索引。请先执行 f0 初始化！")
+             log_func("[ERROR] 致命错误：未找到全局 RAG 索引。请先执行 f0 初始化！")
              return False
 
         log_func("正在加载全局 RAG 索引...")
@@ -175,7 +184,7 @@ class SettingCompletionApp:
             index, chunks = retriever.load_index(index_path, chunks_path)
             log_func(f"已加载索引，包含 {len(chunks)} 个文本块。")
         except Exception as e:
-            log_func(f"❌ 索引加载失败: {str(e)}")
+            log_func(f"[ERROR] 索引加载失败: {str(e)}")
             return False
 
         queries = []
@@ -204,7 +213,7 @@ class SettingCompletionApp:
             log_func(f"成功召回 {min(len(retrieved_chunks), 40)} 个高相关度片段。")
             
         except Exception as e:
-            log_func(f"❌ RAG 检索失败: {str(e)}")
+            log_func(f"[ERROR] RAG 检索失败: {str(e)}")
             return False
 
         if mode == "worldview":
@@ -235,12 +244,11 @@ class SettingCompletionApp:
 
         try:
             result_text = call_deepseek_api(system_prompt=sys_prompt, user_prompt=prompt, model=model, temperature=0.4)
-            with open(save_path, 'w', encoding='utf-8') as f:
-                f.write(result_text)
-            log_func(f"✅ 补全完成！文件落盘至: {save_path}")
+            atomic_write(save_path, result_text, data_type='text')
+            log_func(f"[INFO] 补全完成！文件已原子级落盘至: {save_path}")
             return True
         except Exception as e:
-            log_func(f"❌ API 调用失败: {str(e)}")
+            log_func(f"[ERROR] API 调用失败: {str(e)}")
             return False
 
 def run_headless(target_file, mode, json_string, project_name=None, model="deepseek-chat"):
@@ -256,23 +264,12 @@ def run_headless(target_file, mode, json_string, project_name=None, model="deeps
     if not success: sys.exit(1)
 
 if __name__ == "__main__":
-    import sys
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--target_file", type=str, default="")
-    parser.add_argument("--mode", type=str, help="worldview 或 character", default="")
-    parser.add_argument("--json_data", type=str, help="以 JSON 字符串形式传入的表单数据", default="")
-    parser.add_argument("--project", type=str, default="")
-    parser.add_argument("--model", type=str, default="deepseek-chat")
-    args, unknown = parser.parse_known_args()
-    
-    if not args.mode and len(sys.argv) == 1:
-        import tkinter as tk
-        from tkinter import ttk, filedialog, messagebox
-        root = tk.Tk()
-        app = SettingCompletionApp(root)
-        root.mainloop()
-    else:
-        if not args.mode or not args.json_data:
-            print("error: 静默模式下必须提供 --mode 和 --json_data 参数")
-            sys.exit(1)
-        run_headless(args.target_file, args.mode, args.json_data, args.project, args.model)
+    safe_run_app(
+        app_class=SettingCompletionApp,
+        headless_func=run_headless,
+        target_file="",
+        mode="",
+        json_string="",
+        project_name="",
+        model=""
+    )

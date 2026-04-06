@@ -66,7 +66,7 @@ class CodeMergerApp:
         self.remove_cn_var = tk.BooleanVar(value=False) # 默认不清除
         tk.Checkbutton(bottom_frame, text="🧹 清洗所有中文", variable=self.remove_cn_var, font=("微软雅黑", 9)).pack(side="left", padx=10)
         
-        self.copy_btn = tk.Button(bottom_frame, text="⚡ 一键合并并复制 ⚡", 
+        self.copy_btn = tk.Button(bottom_frame, text="一键合并并复制", 
                                   command=self.merge_and_copy, 
                                   bg="#28a745", fg="white", font=("微软雅黑", 10, "bold"),
                                   padx=20, pady=8)

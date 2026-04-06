@@ -7,6 +7,7 @@
     <link href="https://cdn.staticfile.org/tailwindcss/2.2.19/tailwind.min.css" rel="stylesheet">
     <script src="https://cdn.staticfile.org/vue/3.3.4/vue.global.min.js"></script>
     <script src="https://cdn.staticfile.org/marked/5.1.0/marked.min.js"></script>
+    <script src="https://cdn.staticfile.org/dompurify/3.0.6/purify.min.js"></script>
     <link href="https://lf26-cdn-tos.bytecdntp.com/cdn/expire-1-M/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     <link rel="stylesheet" href="./style.css">
 </head>
@@ -112,7 +113,7 @@
 
             <div>
                 <div class="flex justify-between items-center mb-3">
-                    <h3 class="text-xs font-semibold text-gray-400 uppercase tracking-wider">🗂️ 历史对话</h3>
+                    <h3 class="text-xs font-semibold text-gray-400 uppercase tracking-wider"><i class="fa-solid fa-box-archive mr-1"></i> 历史对话</h3>
                     <div class="space-x-1">
                         <button @click="createNewChat" class="text-gray-500 hover:text-blue-600" title="新建独立对话"><i class="fa-solid fa-plus"></i></button>
                         <button @click="copyCurrentChat" class="text-gray-500 hover:text-green-600" title="克隆当前对话及上下文"><i class="fa-solid fa-copy"></i></button>
@@ -129,7 +130,7 @@
             <hr class="border-gray-100">
 
             <div v-if="currentChat">
-                <h3 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">⚙️ 当前对话参数</h3>
+                <h3 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3"><i class="fa-solid fa-sliders mr-1"></i> 当前对话参数</h3>
                 <input type="text" v-model="currentChat.title" placeholder="对话标题" class="w-full text-sm p-2 border border-gray-300 rounded mb-2">
                 <select v-model="currentChat.model" class="w-full text-sm p-2 border border-gray-300 rounded mb-2 bg-white outline-none">
                     <option value="deepseek-chat">DeepSeek-V3 (标准模型)</option>
@@ -145,7 +146,7 @@
                     <input type="range" v-model.number="currentChat.top_p" min="0" max="1" step="0.05" class="w-full h-1 bg-blue-200 rounded-lg appearance-none cursor-pointer mb-3">
                 </div>
 
-                <textarea v-model="currentChat.systemPrompt" placeholder="🤖 System Prompt (系统提示词)" class="w-full text-sm p-2 border border-gray-300 rounded h-20 mb-2 outline-none"></textarea>
+                <textarea v-model="currentChat.systemPrompt" placeholder="System Prompt (系统提示词)" class="w-full text-sm p-2 border border-gray-300 rounded h-20 mb-2 outline-none"></textarea>
                 
                 <button @click="clearCurrentChatMessages" class="w-full py-2 bg-red-50 hover:bg-red-100 text-red-600 rounded text-sm font-medium transition-colors">
                     <i class="fa-solid fa-trash-can mr-1"></i> 清空当前上下文记录
@@ -243,16 +244,16 @@
                             <option v-for="p in projects" :value="p">{{ p }}</option>
                         </select>
                     </div>
-                    <div class="flex items-center gap-2">
-                        <i class="fa-regular fa-file-lines text-gray-400"></i>
-                        <select v-model="currentChapter" @change="fetchContent" class="flex-1 text-sm bg-gray-50 border border-gray-200 rounded p-1.5 outline-none focus:ring-1 focus:ring-blue-500">
-                            <option v-for="c in chapters" :value="c">{{ c.replace('.txt', '') }}</option>
-                        </select>
-                        <div class="flex gap-1 border-l pl-2 border-gray-200">
-                            <button @click="renameChapter" class="p-1.5 text-gray-400 hover:text-blue-600 rounded hover:bg-gray-100" title="重命名当前章节"><i class="fa-solid fa-pencil"></i></button>
-                            <button @click="addChapter" class="p-1.5 text-gray-400 hover:text-green-600 rounded hover:bg-gray-100" title="新建章节"><i class="fa-solid fa-plus"></i></button>
-                        </div>
-                    </div>
+                    <div class="flex items-center gap-2 w-full"> 
+                        <i class="fa-regular fa-file-lines text-gray-400 shrink-0"></i> 
+                        <select v-model="currentChapter" @change="fetchContent" class="w-0 flex-1 text-sm bg-gray-50 border border-gray-200 rounded p-1.5 outline-none focus:ring-1 focus:ring-blue-500 text-ellipsis"> 
+                            <option v-for="c in chapters" :value="c">{{ c.replace('.txt', '') }}</option> 
+                        </select> 
+                        <div class="flex gap-1 shrink-0 pl-2 border-l border-gray-200"> 
+                            <button @click="renameChapter" class="p-1.5 text-gray-500 hover:text-blue-600 rounded bg-gray-100 hover:bg-gray-200 transition-colors" title="重命名章节"><i class="fa-solid fa-pencil"></i></button> 
+                            <button @click="openCreateModal" class="px-2 py-1.5 text-green-700 hover:text-green-800 rounded bg-green-100 hover:bg-green-200 font-bold transition-colors shadow-sm" title="新建下一章"><i class="fa-solid fa-plus"></i> 新建</button> 
+                        </div> 
+                    </div> 
                 </div>
 
                 <div class="flex-1 bg-white rounded-lg shadow-sm border border-gray-200 flex flex-col overflow-hidden relative">
@@ -446,16 +447,19 @@
                         </div>
                     </div>
 
-                    <div v-if="['f5a', 'f5b', 'f7'].includes(workflowProjectScript)" class="mb-3">
-                        <label class="text-xs text-gray-500 block mb-1">目标章节名</label>
-                        <div class="flex gap-2">
-                            <select v-model="workflowChapterSelect" @change="workflowChapterName = workflowChapterSelect" class="w-1/3 text-sm border border-gray-300 rounded p-2 bg-gray-50 outline-none">
-                                <option value="">-- 选择现有章节 --</option>
-                                <option v-for="chap in chapters" :value="chap.replace('.txt', '')">{{ chap.replace('.txt', '') }}</option>
-                            </select>
-                            <input type="text" v-model="workflowChapterName" placeholder="例如：第一章" class="flex-1 text-sm border border-gray-300 rounded p-2 focus:ring-1 focus:ring-blue-500 outline-none">
-                        </div>
-                    </div>
+                    <div v-if="['f5a', 'f5b', 'f7'].includes(workflowProjectScript)" class="mb-3"> 
+                        <label class="text-xs text-gray-500 block mb-1">目标章节名</label> 
+                        <div class="flex gap-2"> 
+                            <select v-model="workflowChapterSelect" @change="workflowChapterName = workflowChapterSelect" class="w-1/3 text-sm border border-gray-300 rounded p-2 bg-gray-50 outline-none"> 
+                                <option value="">-- 选择现有章节 --</option> 
+                                <option v-for="chap in chapters" :value="chap.replace('.txt', '')">{{ chap.replace('.txt', '') }}</option> 
+                            </select> 
+                            <input type="text" v-model="workflowChapterName" placeholder="例如：第一章" class="flex-1 text-sm border border-gray-300 rounded p-2 focus:ring-1 focus:ring-blue-500 outline-none"> 
+                            <button @click="openCreateModal" class="px-3 py-1 bg-blue-50 text-blue-600 border border-blue-200 rounded text-sm hover:bg-blue-100 transition-colors shrink-0 shadow-sm" title="在底层物理创建此章节"> 
+                                <i class="fa-solid fa-file-circle-plus"></i> 预建 
+                            </button> 
+                        </div> 
+                    </div> 
 
                     <div v-if="workflowProjectScript === 'f5a'" class="mb-3">
                         <label class="text-xs text-gray-500 block mb-1">章节简述 (剧情概要)</label>
@@ -495,7 +499,13 @@
                 </div>
 
                 <div class="mb-3 border-b border-gray-100 pb-3">
-                    <label class="text-xs text-gray-500 block mb-2">运行模式</label>
+                    <div class="flex justify-between items-center mb-2">
+                        <label class="text-xs text-gray-500 block">运行模式</label>
+                        <label class="flex items-center gap-1 text-xs cursor-pointer bg-red-50 text-red-600 px-2 py-1 rounded border border-red-100 transition-colors hover:bg-red-100" title="勾选后将无视本地已有文件，强行呼叫大模型重写并消耗Token">
+                            <input type="checkbox" v-model="forceOverwrite" class="accent-red-600 cursor-pointer">
+                            <i class="fa-solid fa-triangle-exclamation"></i> 强制覆盖重写 (无视缓存)
+                        </label>
+                    </div>
                     <div class="flex gap-4">
                         <label class="flex items-center gap-1 text-sm cursor-pointer"><input type="radio" v-model="styleExtractMode" value="auto" class="text-blue-600 focus:ring-blue-500"> 一键生成 (全自动流水线)</label>
                         <label class="flex items-center gap-1 text-sm cursor-pointer"><input type="radio" v-model="styleExtractMode" value="manual" class="text-blue-600 focus:ring-blue-500"> 手动选择 (单步执行)</label>
@@ -534,7 +544,7 @@
                             <div v-else>
                                 <div class="mb-4">
                                     <h4 class="text-xs font-bold text-gray-700 mb-2 border-b pb-1 border-gray-100 flex justify-between">
-                                        <span>🌟 推荐角色 (来自 f3b 设定)</span>
+                                        <span>推荐角色 (来自 f3b 设定)</span>
                                     </h4>
                                     <div v-if="recommendedChars.length === 0" class="text-xs text-gray-400 italic">未在设定中识别到角色。</div>
                                     <div class="flex flex-wrap gap-2">
@@ -558,7 +568,7 @@
                                 </div>
 
                                 <div class="mb-4">
-                                    <h4 class="text-xs font-bold text-gray-700 mb-2 border-b pb-1 border-gray-100">📊 备选添加 (按全书词频排序)</h4>
+                                    <h4 class="text-xs font-bold text-gray-700 mb-2 border-b pb-1 border-gray-100">备选添加 (按全书词频排序)</h4>
                                     <div v-if="freqChars.length === 0" class="text-xs text-gray-400 italic">暂无词频数据，请先运行 f2a。</div>
                                     <div class="flex flex-wrap gap-1.5 max-h-32 overflow-y-auto p-1 bg-gray-50 rounded border border-gray-100">
                                         <label v-for="(char, idx) in freqChars" :key="'f'+idx" 
@@ -570,7 +580,7 @@
                                 </div>
 
                                 <div>
-                                    <h4 class="text-xs font-bold text-gray-700 mb-2 border-b pb-1 border-gray-100">✍️ 自定义补充</h4>
+                                    <h4 class="text-xs font-bold text-gray-700 mb-2 border-b pb-1 border-gray-100">自定义补充</h4>
                                     <input type="text" v-model="customCharInput" placeholder="在此输入其余漏掉的角色，例如：小医仙(女主), 海波东" class="w-full text-xs border border-gray-300 rounded p-2 outline-none focus:ring-1 focus:ring-blue-500 shadow-sm">
                                 </div>
                             </div>
@@ -623,7 +633,7 @@
                             
                             <div v-else-if="recommendedChars.length > 0 || freqChars.length > 0" class="space-y-4 bg-white p-3 rounded border border-yellow-200 mb-3 max-h-48 overflow-y-auto">
                                 <div>
-                                    <span class="text-xs font-bold text-gray-700 mb-2 block border-b pb-1 border-gray-100">🌟 推荐角色 (来自 f3b 设定)</span>
+                                    <span class="text-xs font-bold text-gray-700 mb-2 block border-b pb-1 border-gray-100">推荐角色 (来自 f3b 设定)</span>
                                     <div class="flex flex-wrap gap-2">
                                         <label v-for="(char, idx) in recommendedChars" :key="'ar'+idx" class="flex items-center text-xs bg-blue-50 border border-blue-200 rounded px-2 py-1.5 cursor-pointer hover:bg-blue-100 shadow-sm transition-colors">
                                             <input type="checkbox" v-model="char.selected" class="mr-1.5 accent-blue-600">
@@ -632,7 +642,7 @@
                                     </div>
                                 </div>
                                 <div>
-                                    <span class="text-xs font-bold text-gray-700 mb-2 block border-b pb-1 border-gray-100">📊 高频词备选 (根据 f2a 全书词汇倒序)</span>
+                                    <span class="text-xs font-bold text-gray-700 mb-2 block border-b pb-1 border-gray-100">高频词备选 (根据 f2a 全书词汇倒序)</span>
                                     <div class="flex flex-wrap gap-1.5">
                                         <label v-for="(char, idx) in freqChars" :key="'af'+idx" class="flex items-center text-xs bg-gray-50 border border-gray-200 rounded px-2 py-1 cursor-pointer hover:bg-gray-100 transition-colors">
                                             <input type="checkbox" v-model="char.selected" class="mr-1.5 accent-gray-600">
@@ -708,8 +718,35 @@
             </div>
         </div>
     </div>
-</div>
-
-<script src="./app.js"></script>
+</div> 
+ 
+ <div v-if="showChapterModal" class="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50 transition-opacity"> 
+     <div class="bg-white p-6 rounded-xl shadow-2xl w-96 border border-gray-100"> 
+         <h3 class="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2"> 
+             <i class="fa-solid fa-file-circle-plus text-blue-500"></i> 新建章节 
+         </h3> 
+         
+         <div class="mb-4"> 
+             <label class="block text-sm font-bold text-gray-700 mb-1">章节序号 (第 N 章)</label> 
+             <div class="flex items-center gap-2"> 
+                 <span class="text-gray-500 font-medium">第</span> 
+                 <input type="number" v-model="newChapterNum" min="1" class="flex-1 border border-gray-300 rounded-lg p-2 outline-none focus:ring-2 focus:ring-blue-500 text-center font-bold text-blue-600"> 
+                 <span class="text-gray-500 font-medium">章</span> 
+             </div> 
+         </div> 
+         
+         <div class="mb-6"> 
+             <label class="block text-sm font-bold text-gray-700 mb-1">章节名 <span class="text-gray-400 font-normal text-xs">(选填，不影响代码逻辑)</span></label> 
+             <input type="text" v-model="newChapterTitle" placeholder="例如：大战黑水玄蛇" @keydown.enter="confirmCreateChapter" class="w-full border border-gray-300 rounded-lg p-2 outline-none focus:ring-2 focus:ring-blue-500"> 
+         </div> 
+         
+         <div class="flex justify-end gap-3"> 
+             <button @click="showChapterModal = false" class="px-4 py-2 text-sm font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors">取消</button> 
+             <button @click="confirmCreateChapter" class="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors shadow-md">确认创建</button> 
+         </div> 
+     </div> 
+ </div> 
+ 
+ <script src="./app.js"></script>
 </body>
 </html>
