@@ -1,3 +1,4 @@
+# --- File: core/_core_rag.py ---
 import os
 import json
 import shutil
@@ -6,6 +7,9 @@ import numpy as np
 import uuid
 import requests
 import logging
+import time  # 新增导入：用于微观限流
+from requests.adapters import HTTPAdapter  # 新增导入：用于连接池配置
+from urllib3.util.retry import Retry  # 新增导入：用于重试机制
 
 # 屏蔽 transformers 模型加载时的非关键警告
 logging.getLogger("transformers.modeling_utils").setLevel(logging.ERROR)
@@ -22,6 +26,18 @@ class RemoteEmbedder:
             self.endpoint = f"{base_url}/api/internal/embed"
         else:
             self.endpoint = endpoint
+            
+        # 【修改点】：配置全局 Session 连接池与指数退避重试策略
+        self.session = requests.Session()
+        retry_strategy = Retry(
+            total=5,  # 最大重试次数
+            backoff_factor=1.5,  # 遇错后的等待时间倍数 (1.5s, 3s, 6s...)
+            status_forcelist=[429, 500, 502, 503, 504],  # 遇到这些状态码自动重试
+            allowed_methods=["POST"]
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=10, pool_maxsize=10)
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
         
     def encode(self, texts, batch_size=8, show_progress_bar=False):
         # 如果传入的是单条文本，转为列表
@@ -31,12 +47,12 @@ class RemoteEmbedder:
         all_embeddings = []
         total_chunks = len(texts)
         
-        # 【致命 Bug 修复】：强制引入批处理逻辑，避免全量数据一把梭导致主进程噎死或超时
+        # 强制引入批处理逻辑，避免全量数据一把梭导致主进程噎死或超时
         for i in range(0, total_chunks, batch_size):
             batch_texts = texts[i:i + batch_size]
             try:
-                # 向主进程发起轻量级 HTTP 请求获取向量矩阵
-                response = requests.post(self.endpoint, json={"texts": batch_texts}, timeout=120)
+                # 【修改点】：使用维护好的 session 替代原生 requests.post
+                response = self.session.post(self.endpoint, json={"texts": batch_texts}, timeout=120)
                 response.raise_for_status()
                 
                 # 收集该批次的向量结果
@@ -45,10 +61,13 @@ class RemoteEmbedder:
                 # 同步打印进度，强制 flush 吐给前端，避免假死感
                 if show_progress_bar:
                     current = min(i + batch_size, total_chunks)
-                    print(f"🚀 向量化批处理进度: {current} / {total_chunks} 块", flush=True)
+                    print(f"[INFO] 向量化批处理进度: {current} / {total_chunks} 块", flush=True)
+                
+                # 【修改点】：批次间增加微小休眠，主动让出主进程响应窗口，防死锁
+                time.sleep(0.2)
                     
             except Exception as e:
-                print(f"⚠️ 调用主进程向量模型失败 (批次 {i} - {i+batch_size}): {e}")
+                print(f"[ERROR] 调用主进程向量模型失败 (批次 {i} - {i+batch_size}): {e}")
                 raise
                 
         # 还原为原版 SentenceTransformer 产出的 numpy 矩阵格式，完美欺骗外层调用链

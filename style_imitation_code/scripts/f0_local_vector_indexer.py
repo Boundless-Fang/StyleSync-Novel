@@ -1,4 +1,16 @@
 import sys
+from core._core_gui_runner import safe_run_app
+
+class GlobalIndexerGUI:
+    def __init__(self, root):
+        from tkinter import ttk
+        self.root = root
+        self.root.title("f0: 全局向量索引构建")
+        self.root.geometry("400x200")
+        ttk.Label(root, text="f0 环节目前主要用于后台索引构建，\n请通过命令行或 Web 界面调用。", justify="center").pack(expand=True)
+
+def run_headless(target_file):
+    GlobalIndexerApp.run(target_file)
 import argparse
 import os
 import json
@@ -21,7 +33,7 @@ if parent_dir not in sys.path:
 # 2. 导入 core 模块 (注意加 core. 前缀)
 # =====================================================================
 from core._core_config import REFERENCE_DIR, STYLE_DIR
-from core._core_utils import smart_read_text
+from core._core_utils import smart_read_text, atomic_write
 from core._core_rag import RAGRetriever
 
 class GlobalIndexerApp:
@@ -41,7 +53,7 @@ class GlobalIndexerApp:
         
         # 如果没搜到章节，退回原始滑动窗口逻辑
         if not matches:
-            print("⚠️ 未检测到标准章节标记，退回原始滑动窗口方案。")
+            print("[WARN] 未检测到标准章节标记，退回原始滑动窗口方案。")
             return GlobalIndexerApp.fallback_chunking(text)
 
         for i in range(len(matches)):
@@ -121,7 +133,7 @@ class GlobalIndexerApp:
         processed_chunks = GlobalIndexerApp.split_by_chapters_smart(text)
         chunk_texts = [item["text"] for item in processed_chunks]
         
-        print(f"✅ 章节识别完成：共生成 {len(processed_chunks)} 个语义块。")
+        print(f"[INFO] 章节 recognition 完成：共生成 {len(processed_chunks)} 个语义块。")
 
         # 加载 BGE-M3 模型并执行向量化
         retriever = RAGRetriever()
@@ -133,20 +145,17 @@ class GlobalIndexerApp:
         index = faiss.IndexFlatL2(dimension)
         index.add(np.array(embeddings).astype('float32'))
 
-        # 保存索引与带元数据的文本块
+        # 保存索引与带元数据的文本块 (使用原子写入保护)
         index_path = os.path.join(rag_db_dir, "vector.index")
         chunks_path = os.path.join(rag_db_dir, "chunks.json")
 
-        with open(chunks_path, 'w', encoding='utf-8') as f:
-            json.dump(processed_chunks, f, ensure_ascii=False, indent=2)
-
-        temp_path = "temp_vector_index.bin"
-        faiss.write_index(index, temp_path)
-        shutil.move(temp_path, index_path)
-        print(f"🚀 全局 RAG 索引构建成功，已保存至: {rag_db_dir}")
+        try:
+            atomic_write(chunks_path, processed_chunks, data_type='json')
+            atomic_write(index_path, index, data_type='faiss')
+        except Exception as e:
+            print(f"[ERROR] 索引文件落盘失败: {e}")
+            raise
+        print(f"[INFO] 全局 RAG 索引构建成功，已保存至: {rag_db_dir}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--target_file", type=str, required=True)
-    args, _ = parser.parse_known_args()
-    GlobalIndexerApp.run(args.target_file)
+    safe_run_app(app_class=GlobalIndexerGUI, headless_func=run_headless, target_file="")

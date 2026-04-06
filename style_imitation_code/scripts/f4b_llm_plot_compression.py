@@ -1,3 +1,4 @@
+# --- File: scripts/f4b_llm_plot_compression.py ---
 import os
 import re
 import json
@@ -13,6 +14,14 @@ import numpy as np
 # 1. 跨目录寻址：将父目录(style_imitation_code)加入环境变量
 # =====================================================================
 import sys
+from core._core_gui_runner import safe_run_app
+
+try:
+    import tkinter as tk
+    from tkinter import ttk, filedialog, messagebox
+except ImportError:
+    tk = None
+    ttk = None
 current_dir = os.path.dirname(os.path.abspath(__file__)) # 指向 scripts/
 parent_dir = os.path.dirname(current_dir)                # 指向 style_imitation_code/
 if parent_dir not in sys.path:
@@ -22,7 +31,7 @@ if parent_dir not in sys.path:
 # 2. 导入 core 模块 (注意加 core. 前缀)
 # =====================================================================
 from core._core_config import BASE_DIR, PROJECT_ROOT, REFERENCE_DIR, STYLE_DIR, PROJ_DIR
-from core._core_utils import smart_read_text
+from core._core_utils import smart_read_text, atomic_write
 from core._core_rag import RAGRetriever
 
 class LocalPlotCompressionApp:
@@ -49,12 +58,12 @@ class LocalPlotCompressionApp:
         ttk.Entry(frame_settings, textvariable=self.chunk_size_var, width=15).grid(row=0, column=1, sticky="w", pady=5)
         ttk.Label(frame_settings, text="*系统将动态合并章节，超过此字数即切分打包", foreground="gray").grid(row=0, column=2, sticky="w", padx=10)
         
-        self.btn_process = ttk.Button(self.root, text="▶ 执行章节切分与构建本地检索库", command=self.start_process_thread)
+        self.btn_process = ttk.Button(self.root, text="执行章节切分与构建本地检索库", command=self.start_process_thread)
         self.btn_process.pack(pady=10)
 
         self.log_text = tk.Text(self.root, height=10, width=85, state="disabled", bg="#f8f9fa")
         self.log_text.pack(padx=10, pady=5)
-        self.log("系统就绪。本环节将采用统一的 1024 维 BAAI 模型构建同人库。")
+        self.log("系统就绪。本环节将采用统一的 1024 维 BAAI 模型构建同人库。已启用双重内存防爆机制。")
 
     def log(self, message):
         self.log_text.config(state="normal")
@@ -95,16 +104,26 @@ class LocalPlotCompressionApp:
     @staticmethod
     def extract_chunk_keywords(chunk_text, global_vocab, top_n=20):
         keyword_counts = Counter()
+        # 优先使用全局词库进行基础匹配 (O(N) 复杂度，极快)
         for word in global_vocab:
             count = chunk_text.count(word)
             if count > 0:
                 keyword_counts[word] += count
                 
+        # 当全局词库命中率极低时，才启用底层的词性标注兜底
         if len(keyword_counts) < top_n // 2:
-            words = pseg.cut(chunk_text)
-            for w, flag in words:
-                if len(w) >= 2 and flag in ['nr', 'ns', 'nt']:
-                    keyword_counts[w] += 1
+            # 【优化与防护】：将超长文本切分为 2000 字的微批次，防止 HMM 模型撑爆内存
+            sub_chunk_size = 2000
+            for i in range(0, len(chunk_text), sub_chunk_size):
+                sub_text = chunk_text[i:i+sub_chunk_size]
+                try:
+                    words = pseg.cut(sub_text)
+                    for w, flag in words:
+                        if len(w) >= 2 and flag in ['nr', 'ns', 'nt']:
+                            keyword_counts[w] += 1
+                except Exception as e:
+                    # 风险防护：捕获罕见的不可见字符或乱码引发的 Jieba 崩溃，直接跳过当前坏块
+                    pass
                     
         return [word for word, count in keyword_counts.most_common(top_n)]
 
@@ -173,12 +192,12 @@ class LocalPlotCompressionApp:
         try:
             full_text = smart_read_text(original_path)
         except Exception as e:
-            log_func(f"❌ 读取原文失败: {e}")
+            log_func(f"[ERROR] 读取原文失败: {e}")
             return False
 
         global_vocab = LocalPlotCompressionApp.load_global_vocab(vocab_path)
         if not global_vocab:
-            log_func("⚠️ 警告：未发现 f3a 专属词库，将完全依赖 Jieba 提取本章实体。")
+            log_func("[WARN] 警告：未发现 f3a 专属词库，将完全依赖 Jieba 提取本章实体。")
 
         log_func(f"正在进行智能章节切割与合并 (阈值: {chunk_size} 字)...")
         chunks_data = LocalPlotCompressionApp.split_by_chapters(full_text, max_len=chunk_size)
@@ -189,46 +208,61 @@ class LocalPlotCompressionApp:
         summaries = []
         mapping_data = []
         
-        with open(outline_path, 'w', encoding='utf-8') as f_out:
-            f_out.write("# 核心事件与实体分布大纲 (本地伪摘要版)\n\n")
+        # 准备大纲内容
+        outline_content = ["# 核心事件与实体分布大纲 (本地伪摘要版)\n"]
+        for idx, item in enumerate(chunks_data):
+            titles_str = "、".join(item["titles"])
+            keywords = LocalPlotCompressionApp.extract_chunk_keywords(item["text"], global_vocab)
+            keywords_str = "，".join(keywords)
             
-            for idx, item in enumerate(chunks_data):
-                titles_str = "、".join(item["titles"])
-                keywords = LocalPlotCompressionApp.extract_chunk_keywords(item["text"], global_vocab)
-                keywords_str = "，".join(keywords)
-                
-                pseudo_summary = f"包含章节：{titles_str}\n本阶段出场核心实体/高频词：{keywords_str}"
-                summaries.append(pseudo_summary)
-                
-                mapping_data.append({
-                    "id": idx,
-                    "summary": pseudo_summary,
-                    "raw_chunk": item["text"]
-                })
-                
-                f_out.write(f"### 叙事块 {idx+1}\n{pseudo_summary}\n\n")
-
-        log_func("实体提取完毕！正在通过 _core_rag 加载 BAAI 模型进行向量化...")
+            pseudo_summary = f"包含章节：{titles_str}\n本阶段出场核心实体/高频词：{keywords_str}"
+            summaries.append(pseudo_summary)
+            
+            mapping_data.append({
+                "id": idx,
+                "summary": pseudo_summary,
+                "raw_chunk": item["text"]
+            })
+            outline_content.append(f"### 叙事块 {idx+1}\n{pseudo_summary}\n")
+            
         try:
-            # 统一通过 Retriever 获取底层的 1024 维 BAAI 编码器
+            atomic_write(outline_path, "\n".join(outline_content), data_type='text')
+        except Exception as e:
+            log_func(f"[ERROR] 大纲文件落盘失败: {e}")
+            return False
+
+        log_func("实体提取完毕！正在通过 _core_rag 加载 BAAI 模型进行分批向量化...")
+        try:
             retriever = RAGRetriever()
             embedder = retriever.get_embedder()
             
-            # 使用获取到的模型进行批量编码
-            summary_embeddings = embedder.encode(summaries, show_progress_bar=False)
-            dimension = summary_embeddings.shape[1]
-            index = faiss.IndexFlatL2(dimension)
-            index.add(np.array(summary_embeddings).astype('float32'))
+            # 【优化与防护】：对外层 summaries 数组进行宏观大分页，再交由底层小分页，双重限流防崩溃
+            summary_embeddings = []
+            outer_batch_size = 50
+            total_summaries = len(summaries)
             
-            import shutil
-            temp_write_path = "temp_write_index.bin"
-            faiss.write_index(index, temp_write_path)
-            shutil.move(temp_write_path, faiss_index_path)
-            
-            with open(mapping_path, 'w', encoding='utf-8') as f:
-                json.dump(mapping_data, f, ensure_ascii=False, indent=2)
+            for i in range(0, total_summaries, outer_batch_size):
+                batch_summaries = summaries[i:i+outer_batch_size]
+                log_func(f"-> 向量化进度: {min(i+outer_batch_size, total_summaries)} / {total_summaries}")
                 
-            msg = f"✅ 纯本地分层检索库构建完成！全程 0 API 消耗。\n文件已落盘至: {style_dir}"
+                # 保留底层的 batch_size=8 微观控制，关闭底层进度条防止日志刷屏
+                batch_embs = embedder.encode(batch_summaries, batch_size=8, show_progress_bar=False)
+                summary_embeddings.extend(batch_embs)
+                
+            # 统一转换为 numpy 矩阵并写入 FAISS
+            summary_embeddings_np = np.array(summary_embeddings).astype('float32')
+            dimension = summary_embeddings_np.shape[1]
+            index = faiss.IndexFlatL2(dimension)
+            index.add(summary_embeddings_np)
+            
+            try:
+                atomic_write(faiss_index_path, index, data_type='faiss')
+                atomic_write(mapping_path, mapping_data, data_type='json')
+            except Exception as e:
+                log_func(f"[ERROR] 检索库落盘失败: {e}")
+                return False
+                
+            msg = f"[INFO] 纯本地分层检索库构建完成！全程 0 API 消耗。\n文件已落盘至: {style_dir}"
             
             if project_dir:
                 p_outline = os.path.join(project_dir, "plot_outlines.md")
@@ -244,7 +278,7 @@ class LocalPlotCompressionApp:
             log_func(msg)
             return True
         except Exception as e:
-            log_func(f"❌ 向量化或存储阶段失败: {str(e)}")
+            log_func(f"[ERROR] 向量化或存储阶段失败: {str(e)}")
             return False
 
 def run_headless(target_file, project_name=None):
@@ -263,19 +297,9 @@ def run_headless(target_file, project_name=None):
     if not success: sys.exit(1)
 
 if __name__ == "__main__":
-    import sys
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--target_file", type=str, default="")
-    parser.add_argument("--project", type=str, default="")
-    args, unknown = parser.parse_known_args()
-    
-    if not args.target_file and len(sys.argv) == 1:
-        import tkinter as tk
-        from tkinter import ttk, filedialog, messagebox
-        root = tk.Tk()
-        app = LocalPlotCompressionApp(root)
-        root.mainloop()
-    else:
-        if not args.target_file and unknown and not unknown[0].startswith('--'):
-            args.target_file = unknown[0]
-        run_headless(args.target_file, args.project)
+    safe_run_app(
+        app_class=LocalPlotCompressionApp,
+        headless_func=run_headless,
+        target_file="",
+        project_name=""
+    )

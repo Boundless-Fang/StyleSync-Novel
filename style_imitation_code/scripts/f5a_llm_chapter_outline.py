@@ -1,4 +1,3 @@
-# --- File: f5a_llm_chapter_outline.py ---
 import os
 import json
 import argparse
@@ -7,26 +6,35 @@ import faiss
 import numpy as np
 
 # =====================================================================
-# 1. 跨目录寻址：将父目录(style_imitation_code)加入环境变量
+# 1. 跨目录寻址：将父目录加入环境变量
 # =====================================================================
 import sys
-current_dir = os.path.dirname(os.path.abspath(__file__)) # 指向 scripts/
-parent_dir = os.path.dirname(current_dir)                # 指向 style_imitation_code/
+from core._core_gui_runner import safe_run_app
+
+try:
+    import tkinter as tk
+    from tkinter import ttk, messagebox
+except ImportError:
+    tk = None
+    ttk = None
+
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
 if parent_dir not in sys.path:
     sys.path.append(parent_dir)
 
 # =====================================================================
 # 2. 导入 core 模块
 # =====================================================================
-from core._core_config import BASE_DIR, PROJECT_ROOT, PROJ_DIR
-from core._core_utils import smart_read_text
+from core._core_config import PROJ_DIR
+from core._core_utils import smart_read_text, atomic_write
 from core._core_llm import call_deepseek_api
 from core._core_rag import RAGRetriever
 
 class ChapterOutlineApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("f5a: 章节详细大纲生成 (动态角色过滤版)")
+        self.root.title("f5a: 章节详细大纲生成 (严格角色控制与双轨RAG版)")
         self.root.geometry("750x650")
         self.root.resizable(False, False)
         self.create_widgets()
@@ -45,11 +53,11 @@ class ChapterOutlineApp:
         self.chapter_name_var = tk.StringVar()
         ttk.Entry(frame_base, textvariable=self.chapter_name_var, width=30).grid(row=1, column=1, sticky="w", padx=5)
 
-        frame_brief = ttk.LabelFrame(self.root, text="2. 本章核心剧情简述 (系统将根据此内容自动筛选出场角色)")
+        frame_brief = ttk.LabelFrame(self.root, text="2. 本章核心剧情简述 (严格匹配显式出场角色)")
         frame_brief.pack(fill="x", **padding)
         self.brief_text = tk.Text(frame_brief, height=8, width=90)
         self.brief_text.pack(padx=5, pady=5)
-        self.brief_text.insert("1.0", "在这里输入本章打算写什么的简要构思...\n提示：提及角色名字（如：萧炎、药老）可触发角色卡自动加载。")
+        self.brief_text.insert("1.0", "在这里输入本章打算写什么的简要构思...\n提示：仅当此处精确出现角色全名时，系统才会为其加载深度角色卡。")
 
         frame_model = ttk.LabelFrame(self.root, text="3. 执行配置")
         frame_model.pack(fill="x", **padding)
@@ -57,14 +65,15 @@ class ChapterOutlineApp:
         ttk.Radiobutton(frame_model, text="DeepSeek V3 (标准)", variable=self.model_var, value="deepseek-chat").pack(side=tk.LEFT, padx=10, pady=5)
         ttk.Radiobutton(frame_model, text="DeepSeek R1 (推理)", variable=self.model_var, value="deepseek-reasoner").pack(side=tk.LEFT, padx=10, pady=5)
         
-        self.btn_process = ttk.Button(self.root, text="▶ 智能解析背景并生成精细大纲", command=self.start_process_thread)
+        self.btn_process = ttk.Button(self.root, text="智能解析背景并生成精细大纲", command=self.start_process_thread)
         self.btn_process.pack(pady=10)
 
         self.log_text = tk.Text(self.root, height=12, width=95, state="disabled", bg="#f8f9fa")
         self.log_text.pack(padx=10, pady=5)
-        self.log("系统就绪。已启用【动态角色卡过滤机制】，优化 Token 使用效率。")
+        self.log("系统就绪。已启用双轨 RAG 检索，确保世界观背景与前文剧情同步连贯。")
 
     def log(self, message):
+        if not tk: return
         self.log_text.config(state="normal")
         self.log_text.insert(tk.END, message + "\n")
         self.log_text.see(tk.END)
@@ -72,10 +81,9 @@ class ChapterOutlineApp:
         self.root.update_idletasks()
 
     def start_process_thread(self):
-        import tkinter.messagebox as messagebox
         project_name = self.project_var.get().strip()
         chapter_name = self.chapter_name_var.get().strip()
-        chapter_brief = self.brief_text.get("1.0", tk.END).strip()
+        chapter_brief = self.brief_text.get("1.0", "end").strip()
         
         if not project_name or not chapter_name or len(chapter_brief) < 5:
             messagebox.showwarning("提示", "项目名、章节名及有效的剧情简述均为必填！")
@@ -85,10 +93,9 @@ class ChapterOutlineApp:
         threading.Thread(target=self.process_logic, args=(project_name, chapter_name, chapter_brief), daemon=True).start()
 
     def process_logic(self, project_name, chapter_name, chapter_brief):
-        import tkinter.messagebox as messagebox
         model = self.model_var.get()
         result = self.execute_generation(project_name, chapter_name, chapter_brief, model, self.log)
-        if result:
+        if result and tk:
             messagebox.showinfo("完成", f"【{chapter_name}】详细大纲生成完毕！")
         self.btn_process.config(state="normal")
 
@@ -104,7 +111,7 @@ class ChapterOutlineApp:
     @staticmethod
     def get_filtered_characters(target_dir, chapter_brief, log_func):
         """
-        【关键优化】：动态扫描简述，按需加载角色卡
+        【严格模式重建】：取消自动别名猜测，必须完全匹配文件名主体，避免无关 token 注入。
         """
         char_dir = os.path.join(target_dir, "character_profiles")
         if not os.path.exists(char_dir):
@@ -116,7 +123,8 @@ class ChapterOutlineApp:
 
         for f_name in all_char_files:
             char_name_base = os.path.splitext(f_name)[0]
-            # 检查角色名是否出现在简述中
+            
+            # 仅做最基础且严谨的字符串全名匹配
             if char_name_base in chapter_brief:
                 content = ChapterOutlineApp.read_file_safe(os.path.join(char_dir, f_name))
                 if content:
@@ -124,107 +132,86 @@ class ChapterOutlineApp:
                     found_names.append(char_name_base)
         
         if not relevant_texts:
-            log_func("⚠️ 未在简述中检测到特定角色名，将跳过角色卡深度注入（仅依赖世界观）。")
+            log_func("[INFO] 未在简述中检测到特定角色名，将跳过角色卡注入，防止 OOM。")
             return "本章节未提及特定已知角色卡中的人物。"
         
-        log_func(f"✅ 检测到本章关键角色: {', '.join(found_names)}，已成功注入其专属角色卡。")
+        log_func(f"[INFO] 严格匹配命中关键角色: {', '.join(found_names)}，已成功注入其专属角色卡。")
         return "\n\n---\n\n".join(relevant_texts)
 
     @staticmethod
-    def chunk_text(text, max_len=800):
-        paragraphs = [p.strip() for p in text.split('\n') if p.strip()]
-        chunks, current_chunk = [], ""
-        for p in paragraphs:
-            if len(current_chunk) + len(p) <= max_len:
-                current_chunk += p + "\n"
-            else:
-                if current_chunk: chunks.append(current_chunk.strip())
-                current_chunk = p + "\n"
-        if current_chunk: chunks.append(current_chunk.strip())
-        return chunks
+    def retrieve_context(index_path, chunks_path, retriever, query_vec, k_limit):
+        """通用底层索引读取器，抽离复用逻辑"""
+        try:
+            index, chunks = retriever.load_index(index_path, chunks_path)
+            distances, indices = index.search(np.array(query_vec).astype('float32'), k=k_limit)
+            
+            retrieved_data = []
+            for idx in indices[0]:
+                if idx != -1 and idx < len(chunks):
+                    # 兼容不同结构的 chunks
+                    chunk_item = chunks[idx]
+                    if isinstance(chunk_item, dict):
+                        retrieved_data.append(chunk_item.get("summary", chunk_item.get("raw_chunk", chunk_item.get("text", ""))))
+                    else:
+                        retrieved_data.append(chunk_item)
+            return retrieved_data
+        except Exception:
+            return []
 
     @staticmethod
     def execute_generation(project_name, chapter_name, chapter_brief, model, log_func):
         target_dir = os.path.join(PROJ_DIR, project_name)
         if not os.path.exists(target_dir):
-            log_func(f"❌ 错误: 未找到项目目录 {target_dir}")
+            log_func(f"[ERROR] 错误: 未找到项目目录 {target_dir}")
             return False
             
         outlines_dir = os.path.join(target_dir, "chapter_structures")
         os.makedirs(outlines_dir, exist_ok=True)
         save_path = os.path.join(outlines_dir, f"{chapter_name}_outline.md")
 
-        # 1. 加载设定
+        # 1. 静态加载设定
         world_settings = ChapterOutlineApp.read_file_safe(os.path.join(target_dir, "world_settings.md")) or "无详细世界观。"
-        
-        # 2. 【执行优化】筛选角色卡
         characters_info = ChapterOutlineApp.get_filtered_characters(target_dir, chapter_brief, log_func)
 
-        # 3. RAG 逻辑
-        rag_context = "无历史剧情参考。"
-        rag_original_text_for_append = "" 
+        # 2. 双轨 RAG 检索 (解耦原著背景与前文进度)
+        rag_context_original = "无原著背景库参考。"
+        rag_context_project = "无前文剧情记忆。"
         
-        rag_db_dir = os.path.join(target_dir, "hierarchical_rag_db")
-        is_fanfic_mode = os.path.exists(rag_db_dir)
-
         try:
             retriever = RAGRetriever()
             embedder = retriever.get_embedder()
             query_vec = embedder.encode([chapter_brief]) 
             
-            if is_fanfic_mode:
-                log_func("模式识别: 同人模式。正在检索原著关联片段...")
-                faiss_index_path = os.path.join(rag_db_dir, "plot_summary.index")
-                mapping_path = os.path.join(rag_db_dir, "summary_to_raw_mapping.json")
-                
-                if os.path.exists(faiss_index_path):
-                    # 采用 core 层提供的安全加载与检索
-                    import shutil
-                    temp_read_path = f"temp_idx_{os.getpid()}.bin"
-                    shutil.copy2(faiss_index_path, temp_read_path)
-                    index = faiss.read_index(temp_read_path)
-                    os.remove(temp_read_path)
-                    
-                    mapping_data = json.loads(smart_read_text(mapping_path))
-                    distances, indices = index.search(np.array(query_vec).astype('float32'), k=3)
-                    
-                    retrieved_summaries, retrieved_raws = [], []
-                    for idx in indices[0]:
-                        if idx != -1 and idx < len(mapping_data):
-                            item = mapping_data[idx]
-                            retrieved_summaries.append(item.get("summary", ""))
-                            retrieved_raws.append(item.get("raw_chunk", ""))
+            # 轨道 A: 检索同人原著参考库
+            hierarchical_db = os.path.join(target_dir, "hierarchical_rag_db")
+            if os.path.exists(hierarchical_db):
+                log_func("检测到同人原著参考库，正在提取背景环境...")
+                idx_path = os.path.join(hierarchical_db, "plot_summary.index")
+                map_path = os.path.join(hierarchical_db, "summary_to_raw_mapping.json")
+                res = ChapterOutlineApp.retrieve_context(idx_path, map_path, retriever, query_vec, k_limit=2)
+                if res: rag_context_original = "\n\n".join(res)
 
-                    rag_context = "\n\n".join(retrieved_summaries)
-                    rag_original_text_for_append = "\n\n...\n\n".join(retrieved_raws)
-                    log_func("✅ 成功找回原著相关背景。")
+            # 轨道 B: 检索本项目已生成前文的动态库 (由 f4c 维护)
+            context_db = os.path.join(target_dir, "context_rag_db")
+            if os.path.exists(context_db):
+                log_func("检测到当前项目前文 RAG 库，正在恢复剧情记忆...")
+                idx_path = os.path.join(context_db, "vector.index")
+                map_path = os.path.join(context_db, "chunks.json")
+                res = ChapterOutlineApp.retrieve_context(idx_path, map_path, retriever, query_vec, k_limit=4)
+                if res: rag_context_project = "\n\n---\n\n".join(res)
             else:
-                log_func("模式识别: 原创模式。正在基于前文内容进行 RAG 衔接检索...")
-                # 原创模式搜索前文 content/ 文件夹中的内容
-                content_dir = os.path.join(target_dir, "content")
-                past_files = sorted([f for f in os.listdir(content_dir) if f.endswith(".txt") and f != f"{chapter_name}.txt"])
-                if past_files:
-                    full_past = "\n".join([ChapterOutlineApp.read_file_safe(os.path.join(content_dir, f)) for f in past_files])
-                    chunks = ChapterOutlineApp.chunk_text(full_past, 1000)
-                    if chunks:
-                        chunk_embs = embedder.encode(chunks)
-                        idx_tmp = faiss.IndexFlatL2(chunk_embs.shape[1])
-                        idx_tmp.add(np.array(chunk_embs).astype('float32'))
-                        _, indices = idx_tmp.search(np.array(query_vec).astype('float32'), k=3)
-                        retrieved = [chunks[i] for i in indices[0] if i != -1]
-                        rag_context = "\n\n---\n\n".join(retrieved)
-                        rag_original_text_for_append = rag_context
+                log_func("[WARN] 未检测到 context_rag_db，可能遭遇断层。建议前往工作台执行一次 f4c 构建前文记忆。")
                 
         except Exception as e:
-            log_func(f"⚠️ RAG 模块非致命异常: {e}")
+            log_func(f"[WARN] 双轨 RAG 模块非致命异常，已执行降级绕过: {e}")
 
-        # 4. 请求模型
+        # 3. 构建严密 Prompt 并请求大模型
         prompt_header = """你是一个顶级网文编剧。请根据以下信息，为用户输入的“本章核心简述”扩写一份【逻辑极其严密、冲突激烈、节奏紧凑】的章节大纲。
 
-### 核心任务清单：
-1. 剧情扩写：严禁复述简述，必须将简述中的模糊点具体化。
-2. 人物对齐：必须符合所提供的角色卡性格与力量等级。
-3. 伏笔埋设：在大纲中预留至少一个悬念点。
+### 核心任务与边界清单（绝密指令）：
+1. 剧情密度控制（Density Control）：如果用户提供的简述包含了过多的事件转折，请强行放缓节奏！你只需重点扩写简述中的【前一到两个核心事件】，剩余事件全部砍掉，留作下一章的悬念。绝不允许把剧情写成走马观花的流水账。
+2. 剧情边界锁死（Boundary Lock）：必须且只能在用户简述的进度处停止！绝不允许擅自推进后续剧情，绝不允许凭空引入简述中未提及的怪物、新人物或大场面。
+3. 人物对齐：必须符合所提供的角色卡性格与力量等级，增加言语试探与心理博弈，禁止一上来就无脑放法宝互砸。
 
 请严格按以下 Markdown 格式输出：
 
@@ -234,17 +221,17 @@ class ChapterOutlineApp:
 - **核心冲突**：
 
 ### 二、 细化大纲
-- **开篇（衔接前文）**：[具体描写]
-- **发展（矛盾升级）**：[具体描写，含动作指令]
-- **高潮（核心冲突）**：[具体描写，含情绪指令]
-- **结尾（悬念钩子）**：[具体描写，为下一章留扣]
+- **开篇（衔接前文）**：[具体描写环境与氛围]
+- **发展（矛盾升级）**：[此阶段必须包含多轮人物对话交锋与试探，严禁直接进入纯动作战斗]
+- **高潮（核心冲突）**：[具体描写，含情绪指令与动作拆解]
+- **结尾（悬念钩子）**：[具体描写，卡在最高潮或悬念处戛然而止，为下一章留扣]
 
 ### 三、 细节注意
 - **关键动作建议**：
 - **雷点/禁忌**：
 
 ---
-【背景设定】：
+【基础设定与上下文矩阵】：
 """
         user_input = f"""{prompt_header}
 [世界观与底层设定]
@@ -253,29 +240,26 @@ class ChapterOutlineApp:
 [出场关键角色卡]
 {characters_info}
 
-[关联前置剧情/原著背景]
-{rag_context}
+[原著参考线索 (仅提供氛围与基础设定供参考，禁止完全照抄剧情)]
+{rag_context_original}
+
+[本书前文记忆剧情 (用于无缝衔接前章进度)]
+{rag_context_project}
 
 [用户本章简述]
 {chapter_brief}
 """
-        sys_prompt = "你是一个专业的小说大纲设计师，严禁废话，只输出 Markdown。"
+        sys_prompt = "你是一个专业的小说大纲设计师，严禁废话，必须严格锁死剧情边界，只输出 Markdown。"
 
         try:
-            log_func("正在连接 DeepSeek 执行深度创作...")
+            log_func("正在连接 DeepSeek 执行深度大纲推演...")
             result_text = call_deepseek_api(system_prompt=sys_prompt, user_prompt=user_input, model=model, temperature=0.6)
             
-            # 附加检索原文供 f5b 学习
-            if rag_original_text_for_append:
-                result_text += "\n\n### 四、 检索到的原文参考（供 f5b 模仿语感）\n"
-                result_text += rag_original_text_for_append
-            
-            with open(save_path, 'w', encoding='utf-8') as f:
-                f.write(result_text)
-            log_func(f"✅ 生成成功！大纲已保存至: {save_path}")
+            atomic_write(save_path, result_text, data_type='text')
+            log_func(f"[INFO] 架构生成成功！大纲已原子级落盘至: {save_path}")
             return True
         except Exception as e:
-            log_func(f"❌ 接口请求失败: {str(e)}")
+            log_func(f"[ERROR] 接口请求失败: {str(e)}")
             return False
 
 def run_headless(project_name, chapter_name, chapter_brief_json, model="deepseek-chat"):
@@ -287,27 +271,18 @@ def run_headless(project_name, chapter_name, chapter_brief_json, model="deepseek
         chapter_brief = chapter_brief_json
 
     if not project_name or not chapter_name:
-        print("error: 缺少必要参数")
         sys.exit(1)
         
-    print(f"静默生成中: {project_name} - {chapter_name}")
-    ChapterOutlineApp.execute_generation(project_name, chapter_name, chapter_brief, model, print)
+    print(f"静默生成大纲中: {project_name} - {chapter_name}")
+    success = ChapterOutlineApp.execute_generation(project_name, chapter_name, chapter_brief, model, print)
+    if not success: sys.exit(1)
 
 if __name__ == "__main__":
-    import sys
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--project", type=str, default="")
-    parser.add_argument("--chapter", type=str, default="")
-    parser.add_argument("--brief", type=str, default="")
-    parser.add_argument("--model", type=str, default="deepseek-chat")
-    args = parser.parse_args()
-    
-    if not args.project and len(sys.argv) == 1:
-        # Tkinter 下沉加载
-        import tkinter as tk
-        from tkinter import ttk
-        root = tk.Tk()
-        app = ChapterOutlineApp(root)
-        root.mainloop()
-    else:
-        run_headless(args.project, args.chapter, args.brief, args.model)
+    safe_run_app(
+        app_class=ChapterOutlineApp,
+        headless_func=run_headless,
+        project_name="",
+        chapter_name="",
+        chapter_brief_json="",
+        model=""
+    )

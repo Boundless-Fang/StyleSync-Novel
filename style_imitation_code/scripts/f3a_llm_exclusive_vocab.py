@@ -8,6 +8,14 @@ import threading
 # 1. 跨目录寻址：将父目录(style_imitation_code)加入环境变量
 # =====================================================================
 import sys
+from core._core_gui_runner import safe_run_app
+
+try:
+    import tkinter as tk
+    from tkinter import ttk, filedialog, messagebox
+except ImportError:
+    tk = None
+    ttk = None
 current_dir = os.path.dirname(os.path.abspath(__file__)) # 指向 scripts/
 parent_dir = os.path.dirname(current_dir)                # 指向 style_imitation_code/
 if parent_dir not in sys.path:
@@ -17,7 +25,7 @@ if parent_dir not in sys.path:
 # 2. 导入 core 模块 (注意加 core. 前缀)
 # =====================================================================
 from core._core_config import BASE_DIR, PROJECT_ROOT, REFERENCE_DIR, STYLE_DIR, PROJ_DIR
-from core._core_utils import smart_read_text
+from core._core_utils import smart_read_text, atomic_write
 from core._core_llm import call_deepseek_api
 from core._core_rag import RAGRetriever
 
@@ -44,7 +52,7 @@ class ExclusiveVocabApp:
         ttk.Radiobutton(frame_model, text="DeepSeek V3 (标准)", variable=self.model_var, value="deepseek-chat").pack(side=tk.LEFT, padx=10, pady=5)
         ttk.Radiobutton(frame_model, text="DeepSeek R1 (推理)", variable=self.model_var, value="deepseek-reasoner").pack(side=tk.LEFT, padx=10, pady=5)
         
-        self.btn_process = ttk.Button(self.root, text="▶ 全文向量化与提取专属词库", command=self.start_process_thread)
+        self.btn_process = ttk.Button(self.root, text="全文向量化与提取专属词库", command=self.start_process_thread)
         self.btn_process.pack(pady=10)
 
         self.log_text = tk.Text(self.root, height=10, width=80, state="disabled", bg="#f8f9fa")
@@ -90,7 +98,7 @@ class ExclusiveVocabApp:
             chunks_path = os.path.join(rag_db_dir, "chunks.json")
 
             if not os.path.exists(index_path) or not os.path.exists(chunks_path):
-                 log_func("❌ 致命错误：未找到全局 RAG 索引。请先执行 f0 初始化！")
+                 log_func("[ERROR] 致命错误：未找到全局 RAG 索引。请先执行 f0 初始化！")
                  return False
 
             try:
@@ -129,7 +137,7 @@ class ExclusiveVocabApp:
                 log_func(f"成功召回 {min(len(retrieved_chunks), 30)} 个高相关度片段，即将请求大模型。")
                 
             except Exception as e:
-                log_func(f"❌ 向量化或检索失败: {str(e)}")
+                log_func(f"[ERROR] 向量化或检索失败: {str(e)}")
                 return False
 
             # 统一调用 _core_llm 请求大语言模型
@@ -149,22 +157,23 @@ class ExclusiveVocabApp:
             try:
                 result_text = call_deepseek_api(system_prompt=sys_prompt, user_prompt=prompt, model=model, temperature=0.2)
                 
-                with open(save_path, 'w', encoding='utf-8') as f:
-                    f.write(result_text)
-                    
-                msg = f"✅ 提取完成！文件落盘至: {save_path}"
-                if project_save_path:
-                    import shutil
-                    shutil.copy2(save_path, project_save_path)
-                    msg += f"\n已同步备份至项目目录: {project_save_path}"
-                    
-                log_func(msg)
-                return True
+                try:
+                    atomic_write(save_path, result_text, data_type='text')
+                    msg = f"[INFO] 提取完成！文件已原子级落盘至: {save_path}"
+                    if project_save_path:
+                        import shutil
+                        shutil.copy2(save_path, project_save_path)
+                        msg += f"\n已同步备份至项目目录: {project_save_path}"
+                    log_func(msg)
+                    return True
+                except Exception as e:
+                    log_func(f"[ERROR] 文件写入失败: {e}")
+                    raise
             except Exception as e:
-                log_func(f"❌ API 调用失败: {str(e)}")
+                log_func(f"[ERROR] API 调用失败: {str(e)}")
                 return False
         except Exception as e:
-            log_func(f"❌ 分析失败: {str(e)}")
+            log_func(f"[ERROR] 分析失败: {str(e)}")
             import traceback
             traceback.print_exc()
             return False
@@ -185,20 +194,10 @@ def run_headless(target_file, project_name=None, model="deepseek-chat"):
     if not success: sys.exit(1)
 
 if __name__ == "__main__":
-    import sys
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--target_file", type=str, default="")
-    parser.add_argument("--project", type=str, default="")
-    parser.add_argument("--model", type=str, default="deepseek-chat")
-    args, unknown = parser.parse_known_args()
-    
-    if not args.target_file and len(sys.argv) == 1:
-        import tkinter as tk
-        from tkinter import ttk, filedialog, messagebox
-        root = tk.Tk()
-        app = ExclusiveVocabApp(root)
-        root.mainloop()
-    else:
-        if not args.target_file and unknown and not unknown[0].startswith('--'):
-            args.target_file = unknown[0]
-        run_headless(args.target_file, args.project, args.model)
+    safe_run_app(
+        app_class=ExclusiveVocabApp,
+        headless_func=run_headless,
+        target_file="",
+        project_name="",
+        model=""
+    )

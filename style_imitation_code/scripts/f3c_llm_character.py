@@ -10,6 +10,14 @@ import threading
 # 1. 跨目录寻址：将父目录(style_imitation_code)加入环境变量
 # =====================================================================
 import sys
+from core._core_gui_runner import safe_run_app
+
+try:
+    import tkinter as tk
+    from tkinter import ttk, filedialog, messagebox
+except ImportError:
+    tk = None
+    ttk = None
 current_dir = os.path.dirname(os.path.abspath(__file__)) # 指向 scripts/
 parent_dir = os.path.dirname(current_dir)                # 指向 style_imitation_code/
 if parent_dir not in sys.path:
@@ -19,7 +27,7 @@ if parent_dir not in sys.path:
 # 2. 导入 core 模块
 # =====================================================================
 from core._core_config import BASE_DIR, PROJECT_ROOT, REFERENCE_DIR, STYLE_DIR, PROJ_DIR
-from core._core_utils import smart_read_text
+from core._core_utils import smart_read_text, atomic_write
 from core._core_llm import call_deepseek_api
 from core._core_rag import RAGRetriever
 
@@ -47,7 +55,7 @@ class CharacterProfileApp:
         
         btn_frame = ttk.Frame(frame_char)
         btn_frame.pack(fill="x", padx=5, pady=2)
-        ttk.Button(btn_frame, text="⚡ 从世界观(f3b)自动智能解析角色", command=self.auto_load_characters).pack(side=tk.LEFT)
+        ttk.Button(btn_frame, text="从世界观(f3b)自动智能解析角色", command=self.auto_load_characters).pack(side=tk.LEFT)
         ttk.Label(btn_frame, text="* 自动依据对数模型计算提取上限，其余可手动输入", foreground="gray").pack(side=tk.LEFT, padx=10)
 
         self.char_text = tk.Text(frame_char, height=6, width=80)
@@ -62,7 +70,7 @@ class CharacterProfileApp:
         ttk.Radiobutton(frame_model, text="DeepSeek R1 (推理)", variable=self.model_var, value="deepseek-reasoner").pack(side=tk.LEFT, padx=10, pady=5)
         
         # --- 执行按钮与日志 ---
-        self.btn_process = ttk.Button(self.root, text="▶ 执行全量向量检索与批量角色卡提取", command=self.start_process_thread)
+        self.btn_process = ttk.Button(self.root, text="执行全量向量检索与批量角色卡提取", command=self.start_process_thread)
         self.btn_process.pack(pady=5)
 
         self.log_text = tk.Text(self.root, height=10, width=85, state="disabled", bg="#f8f9fa")
@@ -108,7 +116,7 @@ class CharacterProfileApp:
             else:
                 limit = max(3, int(5 * math.log10(text_len / 10000.0)))
         except Exception as e:
-            self.log(f"⚠️ 原文长度计算失败，默认限制提取 5 个角色。({str(e)})")
+            self.log(f"[WARN] 原文长度计算失败，默认限制提取 5 个角色。({str(e)})")
             text_len = "未知"
             limit = 5
 
@@ -118,7 +126,7 @@ class CharacterProfileApp:
             # 匹配 "出场角色以及别名：..." 后面的内容
             match = re.search(r'出场角色.*?[：:]\s*(.*)', settings_text)
             if not match:
-                self.log("❌ 无法在 world_settings.md 中定位到 [出场角色] 字段，请检查设定文件格式。")
+                self.log("[ERROR] 无法在 world_settings.md 中定位到 [出场角色] 字段，请检查设定文件格式。")
                 return
 
             chars_str = match.group(1).strip()
@@ -128,19 +136,19 @@ class CharacterProfileApp:
             raw_chars = [c.strip() for c in raw_chars if c.strip() and len(c.strip()) > 1]
 
             if not raw_chars:
-                self.log("❌ 提取到的角色列表为空。")
+                self.log("[ERROR] 提取到的角色列表为空。")
                 return
 
             # 3. 执行截断并应用到界面
             selected_chars = raw_chars[:limit]
-            self.log(f"📊 原文体量: ~{text_len} 字。基于对数模型 (N=5*log10(L/1w))，建议提取上限为 {limit} 个。")
-            self.log(f"✅ 成功从原著世界观中提取出 {len(selected_chars)} 个主要角色！")
+            self.log(f"[INFO] 原文体量: ~{text_len} 字。基于对数模型 (N=5*log10(L/1w))，建议提取上限为 {limit} 个。")
+            self.log(f"[INFO] 成功从原著世界观中提取出 {len(selected_chars)} 个主要角色！")
 
             self.char_text.delete("1.0", tk.END)
             self.char_text.insert(tk.END, "\n".join(selected_chars))
             
         except Exception as e:
-            self.log(f"❌ 自动解析发生错误: {str(e)}")
+            self.log(f"[ERROR] 自动解析发生错误: {str(e)}")
 
 
     def start_process_thread(self):
@@ -169,7 +177,7 @@ class CharacterProfileApp:
         success_count = 0
         total_count = len(chars)
 
-        self.log(f"\n🚀 开始执行批量角色卡提取任务，共计 {total_count} 个目标角色。")
+        self.log(f"\n[INFO] 开始执行批量角色卡提取任务，共计 {total_count} 个目标角色。")
         
         for idx, char_name in enumerate(chars, 1):
             self.log(f"\n--- [任务 {idx}/{total_count}] 正在追踪提取: {char_name} ---")
@@ -203,7 +211,7 @@ class CharacterProfileApp:
             chunks_path = os.path.join(rag_db_dir, "chunks.json")
 
             if not os.path.exists(index_path) or not os.path.exists(chunks_path):
-                 log_func("❌ 致命错误：未找到全局 RAG 索引。请先执行 f0 初始化！")
+                 log_func("[ERROR] 致命错误：未找到全局 RAG 索引。请先执行 f0 初始化！")
                  return False
 
             style_char_dir = os.path.join(style_dir, "character_profiles")
@@ -234,7 +242,7 @@ class CharacterProfileApp:
                 log_func(f"成功召回 {min(len(retrieved_chunks), 50)} 个包含该角色的高相关度片段。")
                 
             except Exception as e:
-                log_func(f"❌ 向量化或检索失败: {str(e)}")
+                log_func(f"[ERROR] 向量化或检索失败: {str(e)}")
                 return False
 
             log_func("正在调用大模型生成角色卡片...")
@@ -281,12 +289,14 @@ class CharacterProfileApp:
                 
                 # 基础防呆校验
                 if "一、 基础属性" not in result_text and "基础属性" not in result_text:
-                    log_func(f"⚠️ 警告：[{main_name}] 返回的内容可能缺失了 Markdown 骨架结构，建议人工检查。")
+                    log_func(f"[WARN] 警告：[{main_name}] 返回的内容可能缺失了 Markdown 骨架结构，建议人工检查。")
 
-                with open(save_path, 'w', encoding='utf-8') as f:
-                    f.write(result_text)
-                    
-                msg = f"✅ [{main_name}] 构建完成！落盘至: {save_path}"
+                try:
+                    atomic_write(save_path, result_text, data_type='text')
+                    msg = f"[INFO] [{main_name}] 构建完成！已原子级落盘至: {save_path}"
+                except Exception as e:
+                    log_func(f"[ERROR] 文件写入失败: {e}")
+                    raise
                 if project_save_path:
                     import shutil
                     shutil.copy2(save_path, project_save_path)
@@ -294,10 +304,10 @@ class CharacterProfileApp:
                 log_func(msg)
                 return True
             except Exception as e:
-                log_func(f"❌ API 调用失败: {str(e)}")
+                log_func(f"[ERROR] API 调用失败: {str(e)}")
                 return False
         except Exception as e:
-            log_func(f"❌ 分析失败: {str(e)}")
+            log_func(f"[ERROR] 分析失败: {str(e)}")
             import traceback
             traceback.print_exc()
             return False
@@ -324,23 +334,11 @@ def run_headless(target_file, character_list_str, project_name=None, model="deep
         CharacterProfileApp.execute_extraction(original_path, char_name, model, print, project_name)
 
 if __name__ == "__main__":
-    import sys
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--target_file", type=str, default="")
-    parser.add_argument("--character", type=str, default="", help="静默模式下使用逗号分隔传入多个角色名") 
-    parser.add_argument("--project", type=str, default="")
-    parser.add_argument("--model", type=str, default="deepseek-chat")
-    args, unknown = parser.parse_known_args()
-    
-    if not args.target_file and len(sys.argv) == 1:
-        # P0修复：在此处下沉延迟加载 tkinter
-        import tkinter as tk
-        from tkinter import ttk
-        root = tk.Tk()
-        app = CharacterProfileApp(root)
-        root.mainloop()
-    else:
-        if not args.character:
-            print("error: 静默模式必须提供 --character 参数 (多个角色用逗号隔开)")
-            sys.exit(1)
-        run_headless(args.target_file, args.character, args.project, args.model)
+    safe_run_app(
+        app_class=CharacterProfileApp,
+        headless_func=run_headless,
+        target_file="",
+        character_list_str="",
+        project_name="",
+        model=""
+    )
