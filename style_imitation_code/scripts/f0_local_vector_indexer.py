@@ -1,42 +1,36 @@
-import sys
-from core._core_gui_runner import safe_run_app
-
-class GlobalIndexerGUI:
-    def __init__(self, root):
-        from tkinter import ttk
-        self.root = root
-        self.root.title("f0: 全局向量索引构建")
-        self.root.geometry("400x200")
-        ttk.Label(root, text="f0 环节目前主要用于后台索引构建，\n请通过命令行或 Web 界面调用。", justify="center").pack(expand=True)
-
-def run_headless(target_file):
-    GlobalIndexerApp.run(target_file)
-import argparse
 import os
+import sys
 import json
 import numpy as np
-import warnings
-import logging
-import shutil
 import faiss
 import re
 
-# =====================================================================
-# 1. 跨目录寻址：将父目录(style_imitation_code)加入环境变量
-# =====================================================================
-current_dir = os.path.dirname(os.path.abspath(__file__)) # 指向 scripts/
-parent_dir = os.path.dirname(current_dir)                # 指向 style_imitation_code/
-if parent_dir not in sys.path:
-    sys.path.append(parent_dir)
+from core._core_gui_runner import safe_run_app, inject_env, ThreadSafeBaseGUI
+inject_env()
 
-# =====================================================================
-# 2. 导入 core 模块 (注意加 core. 前缀)
-# =====================================================================
 from core._core_config import REFERENCE_DIR, STYLE_DIR
 from core._core_utils import smart_read_text, atomic_write
 from core._core_rag import RAGRetriever
 
-class GlobalIndexerApp:
+class GlobalIndexerGUI(ThreadSafeBaseGUI):
+    def __init__(self, root):
+        super().__init__(root, title="f0: 全局向量索引构建", geometry="400x300")
+
+    def setup_custom_widgets(self):
+        from tkinter import ttk
+        import tkinter as tk
+        padding = {'padx': 10, 'pady': 8}
+        
+        ttk.Label(self.root, text="f0 环节目前主要用于后台索引构建，\n请通过命令行或 Web 界面调用。", justify="center").pack(expand=True, pady=10)
+        
+        self.btn_run = ttk.Button(self.root, text="手动开始构建索引 (需先配置 target_file)", state="disabled")
+        self.btn_run.pack(pady=10)
+        self.log("系统就绪。建议通过自动化流程触发此脚本。")
+
+    def execute_logic(self):
+        # 此脚本通常由外部通过 headless 模式调用，此处仅为结构完整性保留
+        pass
+
     @staticmethod
     def split_by_chapters_smart(text, threshold=3000):
         """
@@ -54,7 +48,7 @@ class GlobalIndexerApp:
         # 如果没搜到章节，退回原始滑动窗口逻辑
         if not matches:
             print("[WARN] 未检测到标准章节标记，退回原始滑动窗口方案。")
-            return GlobalIndexerApp.fallback_chunking(text)
+            return GlobalIndexerGUI.fallback_chunking(text)
 
         for i in range(len(matches)):
             start_pos = matches[i].start()
@@ -113,29 +107,32 @@ class GlobalIndexerApp:
         return [{"text": c, "metadata": {"chapter": "unknown"}} for c in chunks]
 
     @staticmethod
-    def run(target_file):
+    def run_indexing(target_file, log_func=print):
         if os.path.isabs(target_file):
             original_path = target_file
         else:
             original_path = os.path.join(REFERENCE_DIR, target_file)
 
         if not os.path.exists(original_path):
-            sys.exit(1)
+            log_func(f"[ERROR] 未找到目标文件: {original_path}")
+            return False
 
         novel_name = os.path.splitext(os.path.basename(original_path))[0]
         style_dir = os.path.join(STYLE_DIR, f"{novel_name}_style_imitation")
         rag_db_dir = os.path.join(style_dir, "global_rag_db")
         os.makedirs(rag_db_dir, exist_ok=True)
 
+        log_func(f"正在读取文本: {original_path}")
         text = smart_read_text(original_path)
         
         # 执行混合动态切分
-        processed_chunks = GlobalIndexerApp.split_by_chapters_smart(text)
+        processed_chunks = GlobalIndexerGUI.split_by_chapters_smart(text)
         chunk_texts = [item["text"] for item in processed_chunks]
         
-        print(f"[INFO] 章节 recognition 完成：共生成 {len(processed_chunks)} 个语义块。")
+        log_func(f"[INFO] 章节 recognition 完成：共生成 {len(processed_chunks)} 个语义块。")
 
         # 加载 BGE-M3 模型并执行向量化
+        log_func("正在初始化向量模型并生成 Embedding...")
         retriever = RAGRetriever()
         embedder = retriever.get_embedder()
         embeddings = embedder.encode(chunk_texts, batch_size=8, show_progress_bar=True)
@@ -153,9 +150,15 @@ class GlobalIndexerApp:
             atomic_write(chunks_path, processed_chunks, data_type='json')
             atomic_write(index_path, index, data_type='faiss')
         except Exception as e:
-            print(f"[ERROR] 索引文件落盘失败: {e}")
-            raise
-        print(f"[INFO] 全局 RAG 索引构建成功，已保存至: {rag_db_dir}")
+            log_func(f"[ERROR] 索引文件落盘失败: {e}")
+            return False
+        log_func(f"[INFO] 全局 RAG 索引构建成功，已保存至: {rag_db_dir}")
+        return True
+
+def run_headless(target_file):
+    success = GlobalIndexerGUI.run_indexing(target_file)
+    if not success:
+        sys.exit(1)
 
 if __name__ == "__main__":
     safe_run_app(app_class=GlobalIndexerGUI, headless_func=run_headless, target_file="")

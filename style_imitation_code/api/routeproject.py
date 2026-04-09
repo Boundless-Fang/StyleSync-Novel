@@ -8,6 +8,9 @@ from fastapi import APIRouter, HTTPException
 from .config import STYLE_DIR, PROJ_DIR
 from .models import ProjectCreate, ChapterUpdate, AppendContent, SettingUpdate
 
+# 【新增引入】：注入核心层提供的异步非阻塞安全 I/O 组件
+from core._core_utils import async_smart_read_text, async_atomic_write, async_append_text
+
 router = APIRouter()
 
 # ==========================================
@@ -184,29 +187,44 @@ async def create_or_rename_chapter(proj_name: str, chap_name: str, new_name: str
 
 @router.get("/api/projects/{proj_name}/chapters/{chap_name}/content")
 async def get_chapter_content(proj_name: str, chap_name: str):
+    # 此处假设不严格防跨越（原逻辑），但建议沿用通用逻辑
     filepath = os.path.join(PROJ_DIR, proj_name, "content", f"{chap_name}.txt")
     if os.path.exists(filepath):
-        with open(filepath, "r", encoding="utf-8") as f:
-            return {"content": f.read()}
+        try:
+            # 替换原生 open 为带有互斥锁的异步非阻塞读取
+            content = await async_smart_read_text(filepath)
+            return {"content": content}
+        except OSError as e:
+            raise HTTPException(status_code=500, detail="文件读取失败或被占用")
     return {"content": ""}
 
 @router.put("/api/projects/{proj_name}/chapters/{chap_name}/content")
 async def update_chapter_content(proj_name: str, chap_name: str, update: ChapterUpdate):
     filepath = os.path.join(PROJ_DIR, proj_name, "content", f"{chap_name}.txt")
-    with open(filepath, "w", encoding="utf-8") as f:
-        f.write(update.content)
-    return {"status": "success"}
+    try:
+        # 替换为带互斥锁的异步非阻塞原子写入
+        await async_atomic_write(filepath, update.content, 'text')
+        return {"status": "success"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="保存章节内容失败")
 
 @router.post("/api/projects/{proj_name}/append")
 async def append_to_novel(proj_name: str, req: AppendContent):
     content_dir = os.path.join(PROJ_DIR, proj_name, "content")
+    if not os.path.exists(content_dir):
+        return {"error": "未找到章节内容目录"}
+        
     chapters = [f for f in os.listdir(content_dir) if f.endswith(".txt")]
     if not chapters:
         return {"error": "未找到章节文件"}
+        
     target_file = os.path.join(content_dir, chapters[0])
-    with open(target_file, "a", encoding="utf-8") as f:
-        f.write("\n\n" + req.content)
-    return {"status": "success"}
+    try:
+        # 替换为带互斥锁的异步非阻塞追加写入
+        await async_append_text(target_file, "\n\n" + req.content)
+        return {"status": "success"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="追加内容失败")
 
 # ==========================================
 # 终极安全版设定读写接口 (重点升级部分)
@@ -215,41 +233,37 @@ async def append_to_novel(proj_name: str, req: AppendContent):
 @router.get("/api/projects/{proj_name}/settings/{file_path:path}")
 async def get_project_setting(proj_name: str, file_path: str):
     try:
-        # 调用核心验证器：一键完成双重清洗
         target_path = get_validated_target_path(proj_name, file_path)
     except HTTPException as e:
-        # GET 请求将拦截信息返回给前端编辑器显示
         return {"content": e.detail}
         
     if not os.path.isfile(target_path):
         return {"content": "文件不存在或尚未生成，请检查工作流执行状态。"}
         
     try:
-        with open(target_path, "r", encoding="utf-8") as f:
-            return {"content": f.read()}
+        # 替换为带互斥锁的异步非阻塞读取
+        content = await async_smart_read_text(target_path)
+        return {"content": content}
     except Exception as e:
-        return {"content": f"系统错误：文件读取异常 ({str(e)})"}
+        return {"content": f"系统错误：文件读取异常。"}
 
 @router.put("/api/projects/{proj_name}/settings/{file_path:path}")
 async def update_project_setting(proj_name: str, file_path: str, update: SettingUpdate):
     try:
-        # 复用核心验证器：一键完成双重清洗
         target_path = get_validated_target_path(proj_name, file_path)
     except HTTPException as e:
-        # 严禁伪装成 200 返回，必须抛出真实 HTTP 异常阻断非法写操作
         raise e
         
-    # 防御文件夹覆盖：防止直接对已存在的目录进行写文件操作引发崩溃
     if os.path.isdir(target_path):
         raise HTTPException(status_code=400, detail="【系统拦截】：目标路径已被文件夹占用，无法写入！")
 
     try:
         os.makedirs(os.path.dirname(target_path), exist_ok=True)
-        with open(target_path, "w", encoding="utf-8") as f:
-            f.write(update.content)
+        # 替换为带互斥锁的异步非阻塞原子写入
+        await async_atomic_write(target_path, update.content, 'text')
         return {"status": "success"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"系统错误：文件写入异常 ({str(e)})")
+        raise HTTPException(status_code=500, detail=f"系统错误：文件写入异常。")
 
 # ==========================================
 # 其他设定检索 API

@@ -1,44 +1,22 @@
 import os
 import json
-import argparse
-import threading
 import faiss
 import numpy as np
 
-# =====================================================================
-# 1. 跨目录寻址：将父目录加入环境变量
-# =====================================================================
-import sys
-from core._core_gui_runner import safe_run_app
+from core._core_gui_runner import safe_run_app, inject_env, ThreadSafeBaseGUI
+inject_env()
 
-try:
-    import tkinter as tk
-    from tkinter import ttk, messagebox
-except ImportError:
-    tk = None
-    ttk = None
-
-current_dir = os.path.dirname(os.path.abspath(__file__))
-parent_dir = os.path.dirname(current_dir)
-if parent_dir not in sys.path:
-    sys.path.append(parent_dir)
-
-# =====================================================================
-# 2. 导入 core 模块
-# =====================================================================
 from core._core_config import PROJ_DIR
 from core._core_utils import smart_read_text, atomic_write
 from core._core_rag import RAGRetriever
 
-class ProjectContextIndexerApp:
+class ProjectContextIndexerApp(ThreadSafeBaseGUI):
     def __init__(self, root):
-        self.root = root
-        self.root.title("f4c: 动态工程上下文检索库构建 (已生成正文 RAG)")
-        self.root.geometry("600x350")
-        self.root.resizable(False, False)
-        self.create_widgets()
+        super().__init__(root, title="f4c: 动态工程上下文检索库构建 (已生成正文 RAG)", geometry="600x350")
 
-    def create_widgets(self):
+    def setup_custom_widgets(self):
+        import tkinter as tk
+        from tkinter import ttk
         padding = {'padx': 10, 'pady': 8}
 
         frame_base = ttk.LabelFrame(self.root, text="1. 定位当前创作工程")
@@ -48,35 +26,20 @@ class ProjectContextIndexerApp:
         self.project_var = tk.StringVar()
         ttk.Entry(frame_base, textvariable=self.project_var, width=40).grid(row=0, column=1, sticky="w", padx=5)
 
-        self.btn_process = ttk.Button(self.root, text="同步并构建项目上下文向量库", command=self.start_process_thread)
+        self.btn_process = ttk.Button(self.root, text="同步并构建项目上下文向量库", command=lambda: self.start_process_thread(self.btn_process))
         self.btn_process.pack(pady=10)
-
-        self.log_text = tk.Text(self.root, height=10, width=75, state="disabled", bg="#f8f9fa")
-        self.log_text.pack(padx=10, pady=5)
         self.log("系统就绪。本节点负责将项目已生成的正文同步至本地 RAG 数据库，防止大模型剧情失忆。")
 
-    def log(self, message):
-        if not tk: return
-        self.log_text.config(state="normal")
-        self.log_text.insert(tk.END, message + "\n")
-        self.log_text.see(tk.END)
-        self.log_text.config(state="disabled")
-        self.root.update_idletasks()
-
-    def start_process_thread(self):
+    def execute_logic(self):
+        import tkinter.messagebox as messagebox
         project_name = self.project_var.get().strip()
         if not project_name:
-            messagebox.showwarning("提示", "项目名称为必填项！")
+            self.log("[ERROR] 项目名称为必填项！")
             return
             
-        self.btn_process.config(state="disabled")
-        threading.Thread(target=self.process_logic, args=(project_name,), daemon=True).start()
-
-    def process_logic(self, project_name):
         result = self.execute_indexing(project_name, self.log)
-        if result and tk:
+        if result:
             messagebox.showinfo("完成", f"【{project_name}】上下文向量库更新完毕！")
-        self.btn_process.config(state="normal")
 
     @staticmethod
     def chunk_text(text, max_len=800):

@@ -1,41 +1,20 @@
 import os
-import argparse
 import shutil
-import threading
 
-# =====================================================================
-# 1. 跨目录寻址：将父目录(style_imitation_code)加入环境变量
-# =====================================================================
-import sys
-from core._core_gui_runner import safe_run_app
+from core._core_gui_runner import safe_run_app, inject_env, ThreadSafeBaseGUI
+inject_env()
 
-try:
-    import tkinter as tk
-    from tkinter import ttk, filedialog, messagebox
-except ImportError:
-    tk = None
-    ttk = None
-current_dir = os.path.dirname(os.path.abspath(__file__)) # 指向 scripts/
-parent_dir = os.path.dirname(current_dir)                # 指向 style_imitation_code/
-if parent_dir not in sys.path:
-    sys.path.append(parent_dir)
-
-# =====================================================================
-# 2. 导入 core 模块 (注意加 core. 前缀)
-# =====================================================================
 from core._core_config import BASE_DIR, PROJECT_ROOT, REFERENCE_DIR, STYLE_DIR, PROJ_DIR
 from core._core_utils import smart_read_text, atomic_write
 from core._core_llm import call_deepseek_api
 
-class StyleAnalysisApp:
+class StyleAnalysisApp(ThreadSafeBaseGUI):
     def __init__(self, root):
-        self.root = root
-        self.root.title("f1b: 文风与行文特征深度提取 (大模型版)")
-        self.root.geometry("600x400")
-        self.root.resizable(False, False)
-        self.create_widgets()
+        super().__init__(root, title="f1b: 文风与行文特征深度提取 (大模型版)", geometry="600x400")
 
-    def create_widgets(self):
+    def setup_custom_widgets(self):
+        import tkinter as tk
+        from tkinter import ttk, filedialog
         padding = {'padx': 10, 'pady': 8}
 
         frame_original = ttk.LabelFrame(self.root, text="1. 选择参考小说原文 (.txt)")
@@ -50,39 +29,27 @@ class StyleAnalysisApp:
         ttk.Radiobutton(frame_model, text="DeepSeek V3 (标准)", variable=self.model_var, value="deepseek-chat").pack(side=tk.LEFT, padx=10, pady=5)
         ttk.Radiobutton(frame_model, text="DeepSeek R1 (推理)", variable=self.model_var, value="deepseek-reasoner").pack(side=tk.LEFT, padx=10, pady=5)
 
-        self.btn_process = ttk.Button(self.root, text="开始提取文风特征", command=self.start_process_thread)
+        self.btn_process = ttk.Button(self.root, text="开始提取文风特征", command=lambda: self.start_process_thread(self.btn_process))
         self.btn_process.pack(pady=10)
 
-        self.log_text = tk.Text(self.root, height=8, width=75, state="disabled", bg="#f8f9fa")
-        self.log_text.pack(padx=10, pady=5)
-        self.log("系统就绪。请选择原文并执行。")
-
-    def log(self, message):
-        self.log_text.config(state="normal")
-        self.log_text.insert(tk.END, message + "\n")
-        self.log_text.see(tk.END)
-        self.log_text.config(state="disabled")
-        self.root.update_idletasks()
-
     def select_original(self):
+        import tkinter as tk
+        from tkinter import filedialog
         init_dir = REFERENCE_DIR if os.path.exists(REFERENCE_DIR) else BASE_DIR
         path = filedialog.askopenfilename(initialdir=init_dir, title="选择原文", filetypes=[("Text Files", "*.txt")])
         if path: self.original_var.set(path)
 
-    def start_process_thread(self):
-        if not self.original_var.get():
-            messagebox.showwarning("提示", "请先选择小说原文文件！")
-            return
-        self.btn_process.config(state="disabled")
-        threading.Thread(target=self.process_logic, daemon=True).start()
-
-    def process_logic(self):
+    def execute_logic(self):
+        import tkinter.messagebox as messagebox
         original_path = self.original_var.get()
         model = self.model_var.get()
+        if not original_path:
+            self.log("[ERROR] 请先选择小说原文文件！")
+            return
+            
         result = self.execute_analysis(original_path, model, self.log, project_name=None)
         if result:
             messagebox.showinfo("完成", f"文风特征提取完毕，文件已生成。")
-        self.btn_process.config(state="normal")
 
     @staticmethod
     def execute_analysis(original_path, model, log_func, project_name=None):
@@ -106,7 +73,7 @@ class StyleAnalysisApp:
 
             log_func("正在请求 API 进行文风特征动态分析...")
             
-            prompt_header = """使用严谨客观的语言，按照以下格式总结该小说的行文特点，不要包含具体的剧情内容和人物名字，允许分类讨论，比如...：在...时...；在...时...。在有标注“举例”的项目里要附上若干示例。
+            prompt_header = """使用严谨客观的语言，按照以下格式总结该小说的行文特点，不要包含具体的剧情内容 and 人物名字，允许分类讨论，比如...：在...时...；在...时...。在有标注“举例”的项目里要附上若干示例。
 一、行文风格
 叙事节奏：推进故事发展或展现事件细节的速度等分类：快节奏（动作冲突密集）/慢节奏（侧重心理与环境铺垫）/快慢交替/延宕（在关键节点故意放缓拉扯）等
 语体色彩：文本遣词造句呈现出的整体质感与语言属性等分类：书面典雅（文艺/古风）/通俗易懂/文白混杂等
@@ -131,7 +98,6 @@ class StyleAnalysisApp:
 【参考原文片段】（前50000字截取）：
 """
             prompt_part_1 = prompt_header + original_text
-
             prompt_part_2 = """五、禁止事项
 1.比较定义（是否出现以下句式）：
 “与其说……不如说……”
@@ -159,7 +125,6 @@ class StyleAnalysisApp:
 绝对禁止：破布娃娃（及人偶、偶人、木偶、断了线的木偶、布娃娃、娃娃等）、濒死的/被抛上岸/砧板上鱼、像一盆冰水、像一把重锤、淬了毒的...、飓风、被抽去骨头的...、祭品、待宰的...、牲畜、最锋利的冰锥、离了水的鱼、重型卡车、灵魂出窍、空白/空白的大脑、行驶的列车/火车、虔诚的...、撞击、山崩地裂、火山爆发、龙卷风、洪流、子弹、炮弹、燎原的火、掠夺、信徒、攻城锤、岩浆、海藻、破碎（形容声音或身体）。
 尽量避免：火星、洪流、毒蛇、小船、催化剂、催情药、小兽、烟花、爆炸、船桨、划船、攻城略地、开疆拓土、机器/机械的、溺水、容器、每一个毛孔都在叫嚣、五脏六腑都错了位、毒刺、羽毛、拉风箱。"""
 
-            # 【优化2】：直接调用封装好的 core_llm 函数，不需要写 headers、payload、容错解析等
             sys_prompt = "你是一个严谨的文本分析程序。请严格按照要求输出 Markdown 格式的纯文本，不要包含任何多余的寒暄。"
             analysis_result = call_deepseek_api(system_prompt=sys_prompt, user_prompt=prompt_part_1, model=model, temperature=0.3)
             
@@ -189,10 +154,7 @@ def run_headless(target_file, project_name=None, model="deepseek-chat"):
         try:
             print(msg)
         except UnicodeEncodeError:
-            try:
-                sys.stdout.buffer.write((msg + "\n").encode('utf-8'))
-            except Exception:
-                pass
+            pass
 
     if os.path.isabs(target_file):
         original_path = target_file
@@ -205,9 +167,7 @@ def run_headless(target_file, project_name=None, model="deepseek-chat"):
     
     safe_log(f"开始静默分析文风特征: {original_path}")
     success = StyleAnalysisApp.execute_analysis(original_path, model, safe_log, project_name)
-    if success:
-        safe_log("文风分析与规则拼接任务成功完成。")
-    else:
+    if not success:
         sys.exit(1)
 
 if __name__ == "__main__":

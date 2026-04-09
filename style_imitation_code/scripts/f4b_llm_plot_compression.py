@@ -1,48 +1,26 @@
-# --- File: scripts/f4b_llm_plot_compression.py ---
 import os
 import re
-import json
-import argparse
-import threading
+import shutil
 from collections import Counter
 import jieba
 import jieba.posseg as pseg
 import faiss
 import numpy as np
 
-# =====================================================================
-# 1. 跨目录寻址：将父目录(style_imitation_code)加入环境变量
-# =====================================================================
-import sys
-from core._core_gui_runner import safe_run_app
+from core._core_gui_runner import safe_run_app, inject_env, ThreadSafeBaseGUI
+inject_env()
 
-try:
-    import tkinter as tk
-    from tkinter import ttk, filedialog, messagebox
-except ImportError:
-    tk = None
-    ttk = None
-current_dir = os.path.dirname(os.path.abspath(__file__)) # 指向 scripts/
-parent_dir = os.path.dirname(current_dir)                # 指向 style_imitation_code/
-if parent_dir not in sys.path:
-    sys.path.append(parent_dir)
-
-# =====================================================================
-# 2. 导入 core 模块 (注意加 core. 前缀)
-# =====================================================================
 from core._core_config import BASE_DIR, PROJECT_ROOT, REFERENCE_DIR, STYLE_DIR, PROJ_DIR
 from core._core_utils import smart_read_text, atomic_write
 from core._core_rag import RAGRetriever
 
-class LocalPlotCompressionApp:
+class LocalPlotCompressionApp(ThreadSafeBaseGUI):
     def __init__(self, root):
-        self.root = root
-        self.root.title("f4b: 动态剧情切分与分层检索库构建 (纯本地降本版)")
-        self.root.geometry("680x420")
-        self.root.resizable(False, False)
-        self.create_widgets()
+        super().__init__(root, title="f4b: 动态剧情切分与分层检索库构建 (纯本地降本版)", geometry="680x420")
 
-    def create_widgets(self):
+    def setup_custom_widgets(self):
+        import tkinter as tk
+        from tkinter import ttk, filedialog
         padding = {'padx': 10, 'pady': 8}
 
         frame_original = ttk.LabelFrame(self.root, text="1. 选择小说原文 (.txt)")
@@ -58,39 +36,28 @@ class LocalPlotCompressionApp:
         ttk.Entry(frame_settings, textvariable=self.chunk_size_var, width=15).grid(row=0, column=1, sticky="w", pady=5)
         ttk.Label(frame_settings, text="*系统将动态合并章节，超过此字数即切分打包", foreground="gray").grid(row=0, column=2, sticky="w", padx=10)
         
-        self.btn_process = ttk.Button(self.root, text="执行章节切分与构建本地检索库", command=self.start_process_thread)
+        self.btn_process = ttk.Button(self.root, text="执行章节切分与构建本地检索库", command=lambda: self.start_process_thread(self.btn_process))
         self.btn_process.pack(pady=10)
-
-        self.log_text = tk.Text(self.root, height=10, width=85, state="disabled", bg="#f8f9fa")
-        self.log_text.pack(padx=10, pady=5)
         self.log("系统就绪。本环节将采用统一的 1024 维 BAAI 模型构建同人库。已启用双重内存防爆机制。")
 
-    def log(self, message):
-        self.log_text.config(state="normal")
-        self.log_text.insert(tk.END, message + "\n")
-        self.log_text.see(tk.END)
-        self.log_text.config(state="disabled")
-        self.root.update_idletasks()
-
     def select_original(self):
+        import tkinter as tk
+        from tkinter import filedialog
         init_dir = REFERENCE_DIR if os.path.exists(REFERENCE_DIR) else BASE_DIR
         path = filedialog.askopenfilename(initialdir=init_dir, filetypes=[("Text Files", "*.txt")])
         if path: self.original_var.set(path)
 
-    def start_process_thread(self):
-        if not self.original_var.get():
-            messagebox.showwarning("提示", "请先选择原文文件！")
-            return
-        self.btn_process.config(state="disabled")
-        threading.Thread(target=self.process_logic, daemon=True).start()
-
-    def process_logic(self):
+    def execute_logic(self):
+        import tkinter.messagebox as messagebox
         original_path = self.original_var.get()
         chunk_size = self.chunk_size_var.get()
+        if not original_path:
+            self.log("[ERROR] 请先选择原文文件！")
+            return
+            
         result = self.execute_compression(original_path, chunk_size, self.log, project_name=None)
         if result:
             messagebox.showinfo("完成", "本地动态分层检索数据库建立完毕！")
-        self.btn_process.config(state="normal")
 
     @staticmethod
     def load_global_vocab(vocab_path):
@@ -121,7 +88,7 @@ class LocalPlotCompressionApp:
                     for w, flag in words:
                         if len(w) >= 2 and flag in ['nr', 'ns', 'nt']:
                             keyword_counts[w] += 1
-                except Exception as e:
+                except Exception:
                     # 风险防护：捕获罕见的不可见字符或乱码引发的 Jieba 崩溃，直接跳过当前坏块
                     pass
                     

@@ -1,0 +1,62 @@
+<div class="flex flex-col h-full bg-white transition-all duration-300 z-20" 
+     :style="{ width: config.showWorkspace ? config.layoutRatio + '%' : '100%', boxShadow: '0 0 15px rgba(0,0,0,0.05)' }">
+    <div class="p-4 border-b border-gray-200 bg-white flex justify-between items-center shadow-sm">
+        <h2 class="font-bold text-gray-800"><i class="fa-regular fa-comments text-blue-500 mr-2"></i>{{ currentChat?.title || '未选择对话' }}</h2>
+        <div class="flex gap-2 items-center">
+            <span class="text-xs text-purple-600 bg-purple-50 px-2 py-1 rounded-full border border-purple-200">消耗Token: {{ currentChat?.stats?.total_tokens || 0 }}</span>
+            <span class="text-xs text-red-500 bg-red-50 px-2 py-1 rounded-full border border-red-200">拦截次数: {{ currentChat?.stats?.local_hit_count || 0 }}</span>
+            <span class="text-xs text-gray-500 bg-gray-100 px-2 py-1 rounded-full border border-gray-200">{{ currentChat?.model }}</span>
+        </div>
+    </div>
+
+    <div class="flex-1 overflow-y-auto p-6 chat-container space-y-6" id="chatContainer">
+        <div v-if="!currentChat?.messages.length" class="h-full flex flex-col items-center justify-center text-gray-400 space-y-4">
+            <i class="fa-regular fa-paper-plane text-4xl mb-2 opacity-50"></i>
+            <p>输入指令，执行交互式对话或文本生成...</p>
+        </div>
+
+        <div v-for="(msg, index) in currentChat?.messages" :key="index" class="flex flex-col">
+            <div v-if="msg.role === 'user'" class="self-end bg-blue-600 text-white p-4 rounded-2xl rounded-tr-sm shadow-md" style="max-width: 85%">
+                <div class="leading-relaxed whitespace-pre-wrap" style="font-size: 0.95em">{{ msg.content }}</div>
+            </div>
+            
+            <div v-else class="self-start w-full bg-gray-50 border border-gray-200 p-5 rounded-2xl rounded-tl-sm shadow-sm group" style="max-width: 95%">
+                <div class="markdown-body leading-relaxed text-gray-700" style="font-size: 0.95em"
+                     v-html="renderMarkdown(msg.versions[msg.active_version].content)">
+                </div>
+                
+                <div class="mt-4 flex items-center justify-between text-xs text-gray-500">
+                    <div v-if="msg.versions.length > 1" class="flex items-center gap-2 bg-white px-2 py-1 rounded border border-gray-200">
+                        <button @click="msg.active_version = Math.max(0, msg.active_version - 1)" class="hover:text-blue-600"><i class="fa-solid fa-chevron-left"></i></button>
+                        <span>版本 {{ msg.active_version + 1 }} / {{ msg.versions.length }}</span>
+                        <button @click="msg.active_version = Math.min(msg.versions.length - 1, msg.active_version + 1)" class="hover:text-blue-600"><i class="fa-solid fa-chevron-right"></i></button>
+                    </div>
+                    <div v-else></div>
+
+                    <div class="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-3">
+                        <span>字数: {{ msg.versions[msg.active_version].content.length }}</span>
+                        <button v-if="config.showWorkspace && projects.length" @click="importToNovel(msg.versions[msg.active_version].content)" class="hover:text-blue-600 transition-colors flex items-center gap-1 bg-white px-2 py-1 rounded shadow-sm border border-gray-200">
+                            <i class="fa-solid fa-file-import"></i> 导入小说末尾
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div v-if="isGenerating" class="self-start text-gray-400 text-sm animate-pulse flex items-center gap-2">
+            <i class="fa-solid fa-circle-notch fa-spin"></i> 模型流式生成中...
+        </div>
+    </div>
+
+    <div class="p-4 bg-gray-50 border-t border-gray-200">
+        <div class="relative flex items-center bg-white rounded-xl border border-gray-300 shadow-sm focus-within:ring-2 focus-within:ring-blue-500 focus-within:border-transparent overflow-hidden">
+            <textarea v-model="chatInput" @keydown.enter.prevent="sendMessage" :disabled="isGenerating" placeholder="输入指令 (Enter 发送)" rows="1" class="w-full py-3 pl-4 pr-12 outline-none resize-none max-h-32 bg-transparent"></textarea>
+            
+            <button v-if="isGenerating" @click="stopGeneration" class="absolute right-2 p-2 text-red-500 hover:bg-red-50 rounded-lg transition-colors" title='强制中断请求'>
+                <i class="fa-solid fa-stop text-lg"></i>
+            </button>
+            <button v-else @click="sendMessage" :disabled="!chatInput.trim()" class="absolute right-2 p-2 text-blue-600 disabled:text-gray-300 hover:bg-blue-50 rounded-lg transition-colors">
+                <i class="fa-solid fa-paper-plane text-lg"></i>
+            </button>
+        </div>
+    </div>
+</div>

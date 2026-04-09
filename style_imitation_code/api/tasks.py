@@ -40,16 +40,15 @@ async def add_task_safe(task_id: str, task_info: dict):
         TASKS[task_id] = task_info
 
 async def save_and_prune_tasks_async():
-    """防线一、二、三：状态快照、互斥锁与异步非阻塞写入"""
+    """防线升级：缩减临界区，分离状态快照与无锁落盘，消除并发死锁"""
     async with db_save_lock:
+        # 【关键修复】：仅在生成数据快照时持有状态锁
         async with tasks_state_lock:
-            # 1. 免疫保护与目标锁定
             finished_tasks = {
                 k: v for k, v in TASKS.items()
                 if v.get("status") not in ["running", "pending"]
             }
             
-            # 2. 精准裁剪
             if len(finished_tasks) > MAX_RETAINED_TASKS:
                 sorted_keys = sorted(
                     finished_tasks.keys(),
@@ -60,10 +59,10 @@ async def save_and_prune_tasks_async():
                 for k in keys_to_delete:
                     TASKS.pop(k, None)
 
-            # 3. 数据快照：字典浅拷贝定格状态
+            # 内存级别字典浅拷贝，纳秒级定格当前状态
             snapshot = {k: v.copy() for k, v in TASKS.items()}
 
-        # 4. 临时态隔离与原子写入 (I/O 线程卸载)
+        # 【关键修复】：剥离 I/O 操作至状态锁外部
         def _write_to_disk():
             temp_path = TASKS_DB_PATH + ".tmp"
             with open(temp_path, 'w', encoding='utf-8') as f:
@@ -71,9 +70,10 @@ async def save_and_prune_tasks_async():
             os.replace(temp_path, TASKS_DB_PATH)
 
         try:
+            # 此时 tasks_state_lock 已释放，其他请求可无阻塞读取 TASKS 字典
             await asyncio.to_thread(_write_to_disk)
-        except Exception as e:
-            print(f"[ERROR] 任务状态落盘失败: {e}")
+        except OSError as e:
+            print(f"[ERROR] 任务状态落盘 I/O 异常: {e}")
 
 async def run_task_safely(task_id: str, cmd_list: list, api_key: str = None):
     # 初始化运行状态时加锁保护

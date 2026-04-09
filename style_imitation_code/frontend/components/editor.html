@@ -1,0 +1,34 @@
+<div v-if="activeTab === 'editor'" class="flex-1 flex flex-col p-4 overflow-hidden">
+    <div v-if="projects.length === 0" class="h-full flex flex-col items-center justify-center text-gray-400">
+        <i class="fa-solid fa-folder-open text-4xl mb-3 opacity-50"></i>
+        <p class="text-sm">尚未定位到项目，请在【自动化工作流】中生成或加载</p>
+    </div>
+    <template v-else>
+        <div class="bg-white p-3 rounded-lg shadow-sm border border-gray-200 mb-3 space-y-3 shrink-0">
+            <div class="flex items-center gap-2">
+                <i class="fa-solid fa-book text-gray-400"></i>
+                <select v-model="currentProject" @change="fetchChapters" class="flex-1 text-sm bg-gray-50 border border-gray-200 rounded p-1.5 outline-none focus:ring-1 focus:ring-blue-500">
+                    <option v-for="p in projects" :value="p">{{ p }}</option>
+                </select>
+            </div>
+            <div class="flex items-center gap-2 w-full"> 
+                <i class="fa-regular fa-file-lines text-gray-400 shrink-0"></i> 
+                <select v-model="currentChapter" @change="fetchContent" class="w-0 flex-1 text-sm bg-gray-50 border border-gray-200 rounded p-1.5 outline-none focus:ring-1 focus:ring-blue-500 text-ellipsis"> 
+                    <option v-for="c in chapters" :value="c">{{ c.replace('.txt', '') }}</option> 
+                </select> 
+                <div class="flex gap-1 shrink-0 pl-2 border-l border-gray-200"> 
+                    <button @click="renameChapter" class="p-1.5 text-gray-500 hover:text-blue-600 rounded bg-gray-100 hover:bg-gray-200 transition-colors" title="重命名章节"><i class="fa-solid fa-pencil"></i></button> 
+                    <button @click="openCreateModal" class="px-2 py-1.5 text-green-700 hover:text-green-800 rounded bg-green-100 hover:bg-green-200 font-bold transition-colors shadow-sm" title="新建下一章"><i class="fa-solid fa-plus"></i> 新建</button> 
+                </div> 
+            </div> 
+        </div>
+
+        <div class="flex-1 bg-white rounded-lg shadow-sm border border-gray-200 flex flex-col overflow-hidden relative">
+            <div class="px-4 py-2 bg-gray-50 border-b border-gray-200 text-xs text-gray-400 flex justify-between items-center">
+                <span>文本编辑器</span>
+                <span :class="saveStatus === '已保存' ? 'text-green-500' : 'text-yellow-500'">{{ saveStatus }} (字数统计: {{ editorContent.length }})</span>
+            </div>
+            <textarea v-model="editorContent" @input="debouncedSave" class="flex-1 w-full p-4 resize-none outline-none leading-relaxed text-gray-700 bg-transparent" style="font-size: 1.05em"></textarea>
+        </div>
+    </template>
+</div>

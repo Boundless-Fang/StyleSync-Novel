@@ -1,44 +1,22 @@
 import os
 import re
 import shutil
-import argparse
-import threading
 
-# =====================================================================
-# 1. 跨目录寻址：将父目录(style_imitation_code)加入环境变量
-# =====================================================================
-import sys
-from core._core_gui_runner import safe_run_app
+from core._core_gui_runner import safe_run_app, inject_env, ThreadSafeBaseGUI
+inject_env()
 
-try:
-    import tkinter as tk
-    from tkinter import ttk, filedialog, messagebox
-except ImportError:
-    tk = None
-    ttk = None
-
-current_dir = os.path.dirname(os.path.abspath(__file__)) # 指向 scripts/
-parent_dir = os.path.dirname(current_dir)                # 指向 style_imitation_code/
-if parent_dir not in sys.path:
-    sys.path.append(parent_dir)
-
-# =====================================================================
-# 2. 导入 core 模块 (注意加 core. 前缀)
-# =====================================================================
 from core._core_config import BASE_DIR, PROJECT_ROOT, REFERENCE_DIR, STYLE_DIR, PROJ_DIR
 from core._core_utils import smart_read_text, atomic_write
 from core._core_llm import call_deepseek_api
 from core._core_rag import RAGRetriever
 
-class KeywordBaseApp:
+class KeywordBaseApp(ThreadSafeBaseGUI):
     def __init__(self, root):
-        self.root = root
-        self.root.title("f2b: 大模型词汇清洗与细节分类提取 (RAG 向量检索版)")
-        self.root.geometry("600x450")
-        self.root.resizable(False, False)
-        self.create_widgets()
+        super().__init__(root, title="f2b: 大模型词汇清洗与细节分类提取 (RAG 向量检索版)", geometry="600x450")
 
-    def create_widgets(self):
+    def setup_custom_widgets(self):
+        import tkinter as tk
+        from tkinter import ttk, filedialog
         padding = {'padx': 10, 'pady': 8}
 
         frame_original = ttk.LabelFrame(self.root, text="1. 选择参考小说原文 (.txt)")
@@ -53,39 +31,28 @@ class KeywordBaseApp:
         ttk.Radiobutton(frame_model, text="DeepSeek V3 (标准)", variable=self.model_var, value="deepseek-chat").pack(side=tk.LEFT, padx=10, pady=5)
         ttk.Radiobutton(frame_model, text="DeepSeek R1 (推理)", variable=self.model_var, value="deepseek-reasoner").pack(side=tk.LEFT, padx=10, pady=5)
 
-        self.btn_process = ttk.Button(self.root, text="执行全量向量化与词汇清洗提取", command=self.start_process_thread)
+        self.btn_process = ttk.Button(self.root, text="执行全量向量化与词汇清洗提取", command=lambda: self.start_process_thread(self.btn_process))
         self.btn_process.pack(pady=10)
-
-        self.log_text = tk.Text(self.root, height=10, width=75, state="disabled", bg="#f8f9fa")
-        self.log_text.pack(padx=10, pady=5)
         self.log("系统就绪。将自动读取全局 RAG 向量库 (由 f0 构建)，结合 f2a 提取的高频词进行精准片段检索。")
 
-    def log(self, message):
-        self.log_text.config(state="normal")
-        self.log_text.insert(tk.END, message + "\n")
-        self.log_text.see(tk.END)
-        self.log_text.config(state="disabled")
-        self.root.update_idletasks()
-
     def select_original(self):
+        import tkinter as tk
+        from tkinter import filedialog
         init_dir = REFERENCE_DIR if os.path.exists(REFERENCE_DIR) else BASE_DIR
         path = filedialog.askopenfilename(initialdir=init_dir, title="选择原文", filetypes=[("Text Files", "*.txt")])
         if path: self.original_var.set(path)
 
-    def start_process_thread(self):
-        if not self.original_var.get():
-            messagebox.showwarning("提示", "请先选择小说原文文件！")
-            return
-        self.btn_process.config(state="disabled")
-        threading.Thread(target=self.process_logic, daemon=True).start()
-
-    def process_logic(self):
+    def execute_logic(self):
+        import tkinter.messagebox as messagebox
         original_path = self.original_var.get()
         model = self.model_var.get()
+        if not original_path:
+            self.log("[ERROR] 请先选择小说原文文件！")
+            return
+            
         result = self.execute_extraction(original_path, model, self.log, project_name=None)
         if result:
             messagebox.showinfo("完成", "词汇清洗与分类完毕，正面词库已生成。")
-        self.btn_process.config(state="normal")
 
     @staticmethod
     def execute_extraction(original_path, model, log_func, project_name=None):
@@ -125,7 +92,7 @@ class KeywordBaseApp:
                 os.makedirs(project_dir, exist_ok=True)
                 project_save_path = os.path.join(project_dir, "positive_words.md")
 
-            # 【优化3】：接入 RAGRetriever，解决维度冲突，抛弃临时拷贝等几十行样板代码
+            # 【优化3】：接入 RAGRetriever
             log_func("正在调用核心层加载全局 RAG 索引...")
             try:
                 retriever = RAGRetriever()
@@ -210,6 +177,7 @@ class KeywordBaseApp:
 
 【高频词列表】：
 """
+            words_text = smart_read_text(words_path)
             prompt = prompt_header + words_text + "\n\n【经 RAG 检索提取的高相关度参考文本片段】：\n" + context_text
 
             # 【优化2】：直接调用封装好的 core_llm 函数

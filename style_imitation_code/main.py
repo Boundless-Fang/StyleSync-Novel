@@ -1,5 +1,5 @@
 import os
-import socket  # 新增导入用于自动获取局域网IP
+import socket
 from dotenv import load_dotenv
 
 # 加载 .env 文件
@@ -10,17 +10,16 @@ os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 # 针对 Windows 强制禁用软链接，解决 WinError 14007 错误
 os.environ["HF_HUB_DISABLE_SYMLINKS"] = "1"
 # 预设模型缓存路径，有时能绕过权限问题
-# 修改为自定义路径，注意 Windows 路径使用双反斜杠或前缀 r
 os.environ["HUGGINGFACE_HUB_CACHE"] = r"D:\StyleSync-Novel\huggingface\hub"
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles  # 新增导入
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 
-# 从拆分出来的 api 包中引入挂载好的 router
 from api import router
-from api.config import CODE_DIR  # 新增导入
+from api.config import CODE_DIR
 
 app = FastAPI(title="DeepSeek Ultimate Pro + Writer")
 
@@ -35,11 +34,19 @@ app.add_middleware(
 # 挂载全部路由
 app.include_router(router)
 
-# 新增：挂载前端静态文件目录
-# 注意：一定要放在 include_router 之后，避免覆盖 API 路由
-app.mount("/", StaticFiles(directory=os.path.join(CODE_DIR, "frontend"), html=True), name="frontend")
+# ================= 核心修改区 =================
+# 1. 静态资源（js, css）必须移到 /static 路径下
+app.mount("/static", StaticFiles(directory=os.path.join(CODE_DIR, "frontend")), name="static")
 
-# 新增：挂载应用启动事件，解析并打印易于点击的真实访问地址
+# 2. 声明 Jinja2 模板引擎目录
+templates = Jinja2Templates(directory=os.path.join(CODE_DIR, "frontend"))
+
+# 3. 根路由交给模板引擎，它会自动把 components 里的 html 拼装好再发给浏览器
+@app.get("/")
+async def serve_frontend(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
+# ==============================================
+
 @app.on_event("startup")
 async def startup_event():
     print("\n" + "="*60)
@@ -47,7 +54,6 @@ async def startup_event():
     print("[界面访问] 请在浏览器中点击或输入以下地址访问工作台：")
     print(" 👉 本机访问: http://127.0.0.1:8000")
     
-    # 容错处理：尝试探测真实局域网 IP
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
@@ -59,5 +65,4 @@ async def startup_event():
     print("="*60 + "\n")
 
 if __name__ == "__main__":
-    
     uvicorn.run(app, host="0.0.0.0", port=8000)
