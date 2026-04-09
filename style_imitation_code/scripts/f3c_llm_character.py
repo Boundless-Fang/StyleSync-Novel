@@ -1,45 +1,23 @@
-# --- File: f3c_llm_character.py ---
 import os
 import re
-import json
+import shutil
 import math
-import argparse
-import threading
 
-# =====================================================================
-# 1. 跨目录寻址：将父目录(style_imitation_code)加入环境变量
-# =====================================================================
-import sys
-from core._core_gui_runner import safe_run_app
+from core._core_gui_runner import safe_run_app, inject_env, ThreadSafeBaseGUI
+inject_env()
 
-try:
-    import tkinter as tk
-    from tkinter import ttk, filedialog, messagebox
-except ImportError:
-    tk = None
-    ttk = None
-current_dir = os.path.dirname(os.path.abspath(__file__)) # 指向 scripts/
-parent_dir = os.path.dirname(current_dir)                # 指向 style_imitation_code/
-if parent_dir not in sys.path:
-    sys.path.append(parent_dir)
-
-# =====================================================================
-# 2. 导入 core 模块
-# =====================================================================
 from core._core_config import BASE_DIR, PROJECT_ROOT, REFERENCE_DIR, STYLE_DIR, PROJ_DIR
 from core._core_utils import smart_read_text, atomic_write
 from core._core_llm import call_deepseek_api
 from core._core_rag import RAGRetriever
 
-class CharacterProfileApp:
+class CharacterProfileApp(ThreadSafeBaseGUI):
     def __init__(self, root):
-        self.root = root
-        self.root.title("f3c: 角色信息卡提取 (对数动态限量 + 批量处理版)")
-        self.root.geometry("680x580")
-        self.root.resizable(False, False)
-        self.create_widgets()
+        super().__init__(root, title="f3c: 角色信息卡提取 (对数动态限量 + 批量处理版)", geometry="680x580")
 
-    def create_widgets(self):
+    def setup_custom_widgets(self):
+        import tkinter as tk
+        from tkinter import ttk, filedialog
         padding = {'padx': 10, 'pady': 8}
 
         # --- 区域 1：原文选择 ---
@@ -69,27 +47,20 @@ class CharacterProfileApp:
         ttk.Radiobutton(frame_model, text="DeepSeek V3 (标准)", variable=self.model_var, value="deepseek-chat").pack(side=tk.LEFT, padx=10, pady=5)
         ttk.Radiobutton(frame_model, text="DeepSeek R1 (推理)", variable=self.model_var, value="deepseek-reasoner").pack(side=tk.LEFT, padx=10, pady=5)
         
-        # --- 执行按钮与日志 ---
-        self.btn_process = ttk.Button(self.root, text="执行全量向量检索与批量角色卡提取", command=self.start_process_thread)
+        # --- 执行按钮 ---
+        self.btn_process = ttk.Button(self.root, text="执行全量向量检索与批量角色卡提取", command=lambda: self.start_process_thread(self.btn_process))
         self.btn_process.pack(pady=5)
-
-        self.log_text = tk.Text(self.root, height=10, width=85, state="disabled", bg="#f8f9fa")
-        self.log_text.pack(padx=10, pady=5)
         self.log("系统就绪。支持基于字数的动态对数限制机制。")
 
-    def log(self, message):
-        self.log_text.config(state="normal")
-        self.log_text.insert(tk.END, message + "\n")
-        self.log_text.see(tk.END)
-        self.log_text.config(state="disabled")
-        self.root.update_idletasks()
-
     def select_original(self):
+        import tkinter as tk
+        from tkinter import filedialog
         init_dir = REFERENCE_DIR if os.path.exists(REFERENCE_DIR) else BASE_DIR
         path = filedialog.askopenfilename(initialdir=init_dir, title="选择原文", filetypes=[("Text Files", "*.txt")])
         if path: self.original_var.set(path)
 
     def auto_load_characters(self):
+        import tkinter as tk
         original_path = self.original_var.get()
         if not original_path or not os.path.exists(original_path):
             import tkinter.messagebox as messagebox
@@ -110,7 +81,7 @@ class CharacterProfileApp:
         try:
             text_content = smart_read_text(original_path)
             text_len = len(text_content)
-            # 核心算法: N = 5 * log10(L / 10000)，保底 3 个
+            # N = 5 * log10(L / 10000)，保底 3 个
             if text_len < 10000:
                 limit = 3
             else:
@@ -123,15 +94,12 @@ class CharacterProfileApp:
         # 2. 从设定中正则提取角色
         try:
             settings_text = smart_read_text(settings_path)
-            # 匹配 "出场角色以及别名：..." 后面的内容
             match = re.search(r'出场角色.*?[：:]\s*(.*)', settings_text)
             if not match:
                 self.log("[ERROR] 无法在 world_settings.md 中定位到 [出场角色] 字段，请检查设定文件格式。")
                 return
 
             chars_str = match.group(1).strip()
-            
-            # 使用进阶正则分割：按顿号/逗号分割，但忽略括号内的逗号
             raw_chars = re.findall(r'[^、，,（(]+(?:\([^)]+\)|（[^）]+）)?', chars_str)
             raw_chars = [c.strip() for c in raw_chars if c.strip() and len(c.strip()) > 1]
 
@@ -141,7 +109,7 @@ class CharacterProfileApp:
 
             # 3. 执行截断并应用到界面
             selected_chars = raw_chars[:limit]
-            self.log(f"[INFO] 原文体量: ~{text_len} 字。基于对数模型 (N=5*log10(L/1w))，建议提取上限为 {limit} 个。")
+            self.log(f"[INFO] 原文体量: ~{text_len} 字。基于对数模型，建议提取上限为 {limit} 个。")
             self.log(f"[INFO] 成功从原著世界观中提取出 {len(selected_chars)} 个主要角色！")
 
             self.char_text.delete("1.0", tk.END)
@@ -150,28 +118,19 @@ class CharacterProfileApp:
         except Exception as e:
             self.log(f"[ERROR] 自动解析发生错误: {str(e)}")
 
-
-    def start_process_thread(self):
+    def execute_logic(self):
         import tkinter.messagebox as messagebox
-        if not self.original_var.get():
-            messagebox.showwarning("提示", "请选择原文文件！")
-            return
-            
-        chars_input = self.char_text.get("1.0", tk.END).strip()
-        if not chars_input or "请点击上方按钮自动解析" in chars_input:
-            messagebox.showwarning("提示", "角色名单不能为空，请自动提取或手动输入！")
-            return
-            
-        self.btn_process.config(state="disabled")
-        threading.Thread(target=self.process_logic, daemon=True).start()
-
-    def process_logic(self):
-        import tkinter.messagebox as messagebox
+        import tkinter as tk
         original_path = self.original_var.get()
         model = self.model_var.get()
         
+        chars_input = self.char_text.get("1.0", tk.END).strip()
+        if not chars_input or "请点击上方按钮自动解析" in chars_input:
+            self.log("[ERROR] 角色名单不能为空，请自动提取或手动输入！")
+            return
+            
         # 将文本框内容切分为列表
-        chars_list = self.char_text.get("1.0", tk.END).strip().split('\n')
+        chars_list = chars_input.split('\n')
         chars = [c.strip() for c in chars_list if c.strip()]
         
         success_count = 0
@@ -187,7 +146,6 @@ class CharacterProfileApp:
 
         self.log(f"\n🎉 批量任务结束！成功提取 {success_count}/{total_count} 个角色。")
         messagebox.showinfo("完成", f"批量角色卡提取完毕！成功 {success_count}/{total_count} 个。")
-        self.btn_process.config(state="normal")
 
     @staticmethod
     def parse_character_names(char_input):
@@ -298,7 +256,6 @@ class CharacterProfileApp:
                     log_func(f"[ERROR] 文件写入失败: {e}")
                     raise
                 if project_save_path:
-                    import shutil
                     shutil.copy2(save_path, project_save_path)
                     
                 log_func(msg)

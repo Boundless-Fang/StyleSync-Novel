@@ -1,43 +1,20 @@
-# --- File: scripts/f7_llm_text_validation.py ---
 import os
 import re
 import json
-import sys
-import threading
-import argparse
 
-# =====================================================================
-# 1. 跨目录寻址：将父目录加入环境变量
-# =====================================================================
-from core._core_gui_runner import safe_run_app
+from core._core_gui_runner import safe_run_app, inject_env, ThreadSafeBaseGUI
+inject_env()
 
-try:
-    import tkinter as tk
-    from tkinter import ttk, messagebox
-except ImportError:
-    tk = None
-    ttk = None
-
-current_dir = os.path.dirname(os.path.abspath(__file__))
-parent_dir = os.path.dirname(current_dir)
-if parent_dir not in sys.path:
-    sys.path.append(parent_dir)
-
-# =====================================================================
-# 2. 导入 core 模块
-# =====================================================================
 from core._core_config import PROJ_DIR, STYLE_DIR
 from core._core_utils import smart_read_text
 
-class TextValidationApp:
+class TextValidationApp(ThreadSafeBaseGUI):
     def __init__(self, root):
-        self.root = root
-        self.root.title("f7: 全局文本智能校验 (宽松模式)")
-        self.root.geometry("650x450")
-        self.root.resizable(False, False)
-        self.create_widgets()
+        super().__init__(root, title="f7: 全局文本智能校验 (宽松模式)", geometry="650x450")
 
-    def create_widgets(self):
+    def setup_custom_widgets(self):
+        import tkinter as tk
+        from tkinter import ttk
         padding = {'padx': 10, 'pady': 8}
 
         frame_base = ttk.LabelFrame(self.root, text="1. 校验目标定位")
@@ -62,34 +39,20 @@ class TextValidationApp:
         ttk.Radiobutton(frame_mode, text="宽松模式 (仅物理硬校验)", variable=self.mode_var, value="loose").pack(side=tk.LEFT, padx=10, pady=5)
         ttk.Radiobutton(frame_mode, text="严格模式 (LLM深度巡检 - 暂未开放)", variable=self.mode_var, value="strict", state="disabled").pack(side=tk.LEFT, padx=10, pady=5)
         
-        self.btn_process = ttk.Button(self.root, text="执行校验", command=self.start_process_thread)
+        self.btn_process = ttk.Button(self.root, text="执行校验", command=lambda: self.start_process_thread(self.btn_process))
         self.btn_process.pack(pady=10)
-
-        self.log_text = tk.Text(self.root, height=12, width=85, state="disabled", bg="#f8f9fa")
-        self.log_text.pack(padx=10, pady=5)
         self.log("系统就绪。当前为宽松模式，仅执行确定性的规则与格式匹配。")
 
-    def log(self, message):
-        if not tk: return
-        self.log_text.config(state="normal")
-        self.log_text.insert(tk.END, message + "\n")
-        self.log_text.see(tk.END)
-        self.log_text.config(state="disabled")
-        self.root.update_idletasks()
-
-    def start_process_thread(self):
+    def execute_logic(self):
+        import tkinter.messagebox as messagebox
         project_name = self.project_var.get().strip()
         script_type = self.script_type_var.get().strip()
         chapter_name = self.chapter_var.get().strip()
         
         if not project_name:
-            messagebox.showwarning("提示", "项目名称为必填项！")
+            self.log("[ERROR] 项目名称为必填项！")
             return
             
-        self.btn_process.config(state="disabled")
-        threading.Thread(target=self.process_logic, args=(project_name, script_type, chapter_name), daemon=True).start()
-
-    def process_logic(self, project_name, script_type, chapter_name):
         mode = self.mode_var.get()
         result = self.execute_validation(project_name, script_type, chapter_name, mode, self.log)
         
@@ -97,31 +60,21 @@ class TextValidationApp:
             messagebox.showinfo("校验通过", f"[{script_type}] 校验已通过。")
         else:
             messagebox.showerror("校验失败", f"[{script_type}] 校验未通过：\n{result.get('feedback')}")
-        self.btn_process.config(state="normal")
 
-    # =========================================================
-    # 安全沙箱路径解析与读取
-    # =========================================================
     @staticmethod
     def get_safe_project_dir(project_name):
-        """严格校验 project_name，防止目录穿越"""
         if not re.match(r'^[\w\-\u4e00-\u9fa5]+$', project_name):
             raise ValueError("非法的项目名称结构")
-            
         if project_name.endswith("_style_imitation"):
             target_base = STYLE_DIR
         else:
             target_base = PROJ_DIR
-            
         safe_base = os.path.realpath(os.path.abspath(target_base))
         target_dir = os.path.realpath(os.path.abspath(os.path.join(safe_base, project_name)))
-        
         if os.path.commonpath([safe_base, target_dir]) != safe_base:
             raise ValueError("越权目录访问拦截")
-            
         if not os.path.exists(target_dir):
             raise FileNotFoundError("目标工程目录不存在")
-            
         return target_dir
 
     @staticmethod
@@ -139,23 +92,16 @@ class TextValidationApp:
         except Exception:
             return None, "文件读取触发底层异常"
 
-    # =========================================================
-    # 各节点物理硬校验逻辑 (Loose Mode)
-    # =========================================================
     @staticmethod
     def execute_validation(project_name, script_type, chapter_name, mode, log_func):
         log_func(f"--- 开始执行 {script_type} 宽松模式校验 ---")
-        
         try:
             target_dir = TextValidationApp.get_safe_project_dir(project_name)
-        except Exception as e:
+        except Exception:
             err_msg = "项目路径安全校验未通过"
             log_func(f"[ERROR] {err_msg}")
             return {"pass": False, "score": 0, "feedback": err_msg}
-
-        # 统一默认失败结构
         result = {"pass": False, "score": 0, "feedback": "未知的脚本节点类型"}
-
         try:
             if script_type == "f0":
                 index_path = os.path.join(target_dir, "global_rag_db", "vector.index")
@@ -164,7 +110,6 @@ class TextValidationApp:
                     result = {"pass": True, "score": 3, "feedback": "向量索引与块映射文件完整。"}
                 else:
                     result["feedback"] = "向量数据库文件缺失或尺寸异常。"
-
             elif script_type == "f1a":
                 content, msg = TextValidationApp.safe_read_target(target_dir, "statistics/统计指标.txt")
                 if content:
@@ -174,7 +119,6 @@ class TextValidationApp:
                         result["feedback"] = "统计文件缺失预设的分析版块标题。"
                 else:
                     result["feedback"] = msg
-
             elif script_type == "f1b":
                 content, msg = TextValidationApp.safe_read_target(target_dir, "features.md")
                 if content:
@@ -185,14 +129,12 @@ class TextValidationApp:
                         result["feedback"] = "文风设定文件缺失必要的一级标题。"
                 else:
                     result["feedback"] = msg
-
             elif script_type == "f2a":
                 content, msg = TextValidationApp.safe_read_target(target_dir, "statistics/高频词.txt")
                 if content and "(" in content and ")" in content:
                     result = {"pass": True, "score": 3, "feedback": "高频词格式解析通过。"}
                 else:
                     result["feedback"] = msg if msg != "success" else "未检测到有效的词频格式。"
-
             elif script_type == "f2b":
                 content, msg = TextValidationApp.safe_read_target(target_dir, "positive_words.md")
                 if content:
@@ -202,14 +144,12 @@ class TextValidationApp:
                         result["feedback"] = "正面词汇库缺失关键类别标签。"
                 else:
                     result["feedback"] = msg
-
             elif script_type == "f3a":
                 content, msg = TextValidationApp.safe_read_target(target_dir, "exclusive_vocab.md")
                 if content and ("-" in content or "*" in content):
                     result = {"pass": True, "score": 3, "feedback": "专属词汇库列表结构检测通过。"}
                 else:
                     result["feedback"] = msg if msg != "success" else "缺失无序列表标识符。"
-
             elif script_type == "f3b":
                 content, msg = TextValidationApp.safe_read_target(target_dir, "world_settings.md")
                 if content:
@@ -220,20 +160,14 @@ class TextValidationApp:
                         result["feedback"] = "世界观设定缺失必要字段(如力量体系)。"
                 else:
                     result["feedback"] = msg
-
             elif script_type == "f3c":
-                # f3c 针对特定角色，需读取指定目录下的文件，此处作泛化检查或要求前端传入 char_name
-                # 为简化宽松校验，检查目录内是否有合法文件
                 char_dir = os.path.join(target_dir, "character_profiles")
                 if os.path.exists(char_dir) and any(f.endswith(".md") for f in os.listdir(char_dir)):
                     result = {"pass": True, "score": 3, "feedback": "角色卡目录存在且包含Markdown文件。"}
                 else:
                     result["feedback"] = "角色卡未生成。"
-
             elif script_type == "f4a":
-                # f4a 修改的是 world_settings.md 或角色卡，检查基础文件变动
                 result = {"pass": True, "score": 3, "feedback": "设定补全物理状态正常。"}
-
             elif script_type == "f4b":
                 idx_path = os.path.join(target_dir, "hierarchical_rag_db", "plot_summary.index")
                 map_path = os.path.join(target_dir, "hierarchical_rag_db", "summary_to_raw_mapping.json")
@@ -241,7 +175,6 @@ class TextValidationApp:
                     result = {"pass": True, "score": 3, "feedback": "分层检索库与映射表完整。"}
                 else:
                     result["feedback"] = "动态压缩库文件生成失败。"
-
             elif script_type == "f5a":
                 if not chapter_name:
                     return {"pass": False, "score": 0, "feedback": "执行 f5a 校验必须提供 chapter_name。"}
@@ -255,21 +188,15 @@ class TextValidationApp:
                         result["feedback"] = "大纲缺失标准叙事结构标题。"
                 else:
                     result["feedback"] = msg
-
             elif script_type == "f5b":
                 if not chapter_name:
                     return {"pass": False, "score": 0, "feedback": "执行 f5b 校验必须提供 chapter_name。"}
-                
                 content, msg = TextValidationApp.safe_read_target(target_dir, f"content/{chapter_name}.txt")
                 if not content:
                     return {"pass": False, "score": 0, "feedback": msg}
-                
-                # 1. 字数校验
                 word_count = len(content)
                 if word_count < 1000:
                     return {"pass": False, "score": 0, "feedback": f"正文字数过少 ({word_count}字)，未达到下限标准。"}
-                
-                # 2. 敏感黑名单校验
                 neg_content, _ = TextValidationApp.safe_read_target(target_dir, "negative_words.md")
                 if neg_content:
                     neg_words = [w.strip() for w in re.split(r'[,，、\n]', neg_content) if w.strip()]
@@ -278,34 +205,23 @@ class TextValidationApp:
                         match = pattern.search(content)
                         if match:
                             return {"pass": False, "score": 0, "feedback": f"正文命中本地违禁词表规则: [{match.group(0)}]"}
-
                 result = {"pass": True, "score": 3, "feedback": f"正文物理指标校验通过 (字数: {word_count})，未命中敏感词。"}
-
-        except Exception as e:
-            # 捕获所有代码级错误，包装为通用异常，防止物理路径泄漏
-            log_func(f"[ERROR] 执行过程出现未预期的中断。")
+        except Exception:
+            log_func("[ERROR] 执行过程出现未预期的中断。")
             result = {"pass": False, "score": 0, "feedback": "系统校验异常拦截：数据解析规则冲突。"}
-
         status_str = "通过" if result["pass"] else "未通过"
         log_func(f">> 校验结果: {status_str} | 分数: {result['score']}")
         log_func(f">> 反馈信息: {result['feedback']}")
-        
         return result
 
 def run_headless(project_name, script_type, chapter_name="", mode="loose"):
+    import sys
     if not project_name or not script_type:
         sys.exit(1)
-        
-    def silent_log(msg):
-        pass
-        
-    result = TextValidationApp.execute_validation(project_name, script_type, chapter_name, mode, silent_log)
-    
-    # 按照严格状态返回，0 为正常退出（通过），1 为异常退出（失败）
+    result = TextValidationApp.execute_validation(project_name, script_type, chapter_name, mode, lambda msg: None)
     if result.get("pass"):
         sys.exit(0)
     else:
-        # 将反馈信息输出到 stderr，供外层调度任务捕获
         sys.stderr.write(result.get("feedback", "校验失败"))
         sys.exit(1)
 

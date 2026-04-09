@@ -1,51 +1,27 @@
-# --- File: scripts/f2a_local_word_freq.py ---
 import os
 import math
-import argparse
-import threading
 from collections import Counter
 import jieba
 
-# =====================================================================
-# 1. 跨目录寻址：将父目录(style_imitation_code)加入环境变量
-# =====================================================================
-import sys
-from core._core_gui_runner import safe_run_app
+from core._core_gui_runner import safe_run_app, inject_env, ThreadSafeBaseGUI
+inject_env()
 
-try:
-    import tkinter as tk
-    from tkinter import ttk, filedialog, messagebox
-except ImportError:
-    tk = None
-    ttk = None
-current_dir = os.path.dirname(os.path.abspath(__file__)) # 指向 scripts/
-parent_dir = os.path.dirname(current_dir)                # 指向 style_imitation_code/
-if parent_dir not in sys.path:
-    sys.path.append(parent_dir)
-
-# =====================================================================
-# 2. 导入 core 模块 (注意加 core. 前缀)
-# =====================================================================
 from core._core_config import BASE_DIR, PROJECT_ROOT, REFERENCE_DIR, STYLE_DIR, PROJ_DIR
-from core._core_utils import smart_read_text, atomic_write
+from core._core_utils import smart_yield_text, atomic_write
 
 PUNCTUATIONS = set("，。！？；：“”‘’（）【】《》、\n\r \t.!?,-[]")
 
-class WordFreqAnalyzerApp:
+class WordFreqAnalyzerApp(ThreadSafeBaseGUI):
     def __init__(self, root):
-        self.root = root
-        self.root.title("f2a: 本地高频词提取工具")
-        self.root.geometry("520x450")
-        self.root.resizable(False, False)
-        self.ensure_directories()
-        self.create_widgets()
+        super().__init__(root, title="f2a: 本地高频词提取工具", geometry="520x450")
 
-    def ensure_directories(self):
+    def setup_custom_widgets(self):
+        import tkinter as tk
+        from tkinter import ttk, filedialog
+        padding = {'padx': 10, 'pady': 8}
+
         for directory in [REFERENCE_DIR, STYLE_DIR, PROJ_DIR]:
             os.makedirs(directory, exist_ok=True)
-
-    def create_widgets(self):
-        padding = {'padx': 10, 'pady': 8}
 
         frame_file = ttk.LabelFrame(self.root, text="1. 选择小说源文件 (reference_novels)")
         frame_file.pack(fill="x", **padding)
@@ -66,58 +42,44 @@ class WordFreqAnalyzerApp:
         self.entry_manual = ttk.Entry(frame_settings, textvariable=self.manual_var, state="disabled", width=10)
         self.entry_manual.grid(row=2, column=1, sticky="w", padx=5, pady=5)
 
-        self.btn_run = ttk.Button(self.root, text="开始提取高频词", command=self.start_processing)
+        self.btn_run = ttk.Button(self.root, text="开始提取高频词", command=lambda: self.start_process_thread(self.btn_run))
         self.btn_run.pack(pady=10)
-
-        self.log_text = tk.Text(self.root, height=8, width=65, state="disabled", bg="#f8f9fa")
-        self.log_text.pack(padx=10, pady=5)
-        self.log("系统就绪。已启用流式分块统计机制，保障低配机器的内存安全。")
 
     def toggle_entry(self):
         self.entry_manual.config(state="normal" if self.top_n_mode.get() == 2 else "disabled")
 
-    def log(self, message):
-        self.log_text.config(state="normal")
-        self.log_text.insert(tk.END, message + "\n")
-        self.log_text.see(tk.END)
-        self.log_text.config(state="disabled")
-        self.root.update_idletasks()
-
     def select_file(self):
+        import tkinter as tk
+        from tkinter import filedialog
         init_dir = REFERENCE_DIR if os.path.exists(REFERENCE_DIR) else BASE_DIR
         path = filedialog.askopenfilename(initialdir=init_dir, title="选择原文", filetypes=[("Text Files", "*.txt")])
         if path: self.file_path_var.set(path)
 
-    def start_processing(self):
-        if not self.file_path_var.get():
-            messagebox.showwarning("警告", "请先选择小说源文件！")
-            return
-        if self.top_n_mode.get() == 2 and not self.manual_var.get().isdigit():
-            messagebox.showwarning("警告", "请输入正确的数字！")
+    def execute_logic(self):
+        import tkinter.messagebox as messagebox
+        file_path = self.file_path_var.get()
+        if not file_path:
+            self.log("[ERROR] 请先选择小说源文件！")
             return
             
-        self.btn_run.config(state="disabled")
-        threading.Thread(target=self.run_extraction, args=(self.file_path_var.get(),), daemon=True).start()
+        if self.top_n_mode.get() == 2 and not self.manual_var.get().isdigit():
+            self.log("[ERROR] 提取数量请输入正确的数字！")
+            return
 
-    def run_extraction(self, file_path):
         try:
-            content = smart_read_text(file_path)
             novel_name = os.path.splitext(os.path.basename(file_path))[0]
             out_dir = os.path.join(STYLE_DIR, f"{novel_name}_style_imitation", "statistics")
             os.makedirs(out_dir, exist_ok=True)
 
-            self.log(f"开始提取《{novel_name}》的高频词...")
+            self.log(f"开始提取《{novel_name}》的高频词 (流式缓冲扫描)...")
             report = []
             
-            # 【核心优化】：分块提取替代全量提取
-            chunk_size = 50000
             word_counts = Counter()
             total_valid_count = 0
             
-            for i in range(0, len(content), chunk_size):
-                chunk = content[i:i+chunk_size]
+            for content_chunk in smart_yield_text(file_path):
                 chunk_valid_words = []
-                for w in jieba.cut(chunk):
+                for w in jieba.cut(content_chunk):
                     w = w.strip()
                     if w and w not in PUNCTUATIONS:
                         chunk_valid_words.append(w)
@@ -125,7 +87,7 @@ class WordFreqAnalyzerApp:
                 total_valid_count += len(chunk_valid_words)
             
             if total_valid_count <= 1:
-                self.log("文本过少，无法提取。")
+                self.log("[WARN] 文本过少，无法提取。")
                 return
 
             if self.top_n_mode.get() == 1:
@@ -148,38 +110,32 @@ class WordFreqAnalyzerApp:
             save_path = os.path.join(out_dir, "高频词.txt")
             atomic_write(save_path, "\n".join(report), data_type='text')
 
-            self.log(f"[INFO] 提取完成！已保存至: {save_path}")
+            self.log(f"[INFO] 提取完成！已原子级落盘至: {save_path}")
         except Exception as e:
-            self.log(f"错误: {str(e)}")
-        finally:
-            self.btn_run.config(state="normal")
+            self.log(f"[ERROR] 错误: {str(e)}")
 
 def run_headless(target_file):
     import sys
     if not os.path.exists(target_file):
         sys.exit(1)
         
-    content = smart_read_text(target_file)
     novel_name = os.path.splitext(os.path.basename(target_file))[0]
     out_dir = os.path.join(STYLE_DIR, f"{novel_name}_style_imitation", "statistics")
     os.makedirs(out_dir, exist_ok=True)
 
-    # 【核心优化】：静默模式同样应用分块与生成器更新
-    chunk_size = 50000
     word_counts = Counter()
     total_valid_count = 0
     
-    for i in range(0, len(content), chunk_size):
-        chunk = content[i:i+chunk_size]
+    for content_chunk in smart_yield_text(target_file):
         chunk_valid_words = []
-        for w in jieba.cut(chunk):
+        for w in jieba.cut(content_chunk):
             w = w.strip()
             if w and w not in PUNCTUATIONS:
                 chunk_valid_words.append(w)
         word_counts.update(chunk_valid_words)
         total_valid_count += len(chunk_valid_words)
 
-    if total_valid_count <= 1: 
+    if total_valid_count <= 1:
         sys.exit(0)
 
     unique = len(word_counts)
