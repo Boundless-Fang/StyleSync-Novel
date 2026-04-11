@@ -2,77 +2,19 @@ import os
 import random
 import re
 
-from core._core_gui_runner import safe_run_app, inject_env, ThreadSafeBaseGUI
+from core._core_cli_runner import safe_run_app, inject_env, HeadlessBaseTask
 inject_env()
 
 from core._core_config import BASE_DIR, PROJECT_ROOT, PROJ_DIR
 from core._core_utils import smart_read_text, atomic_write
 from core._core_llm import stream_deepseek_api  
 
-class NovelGenerationApp(ThreadSafeBaseGUI):
-    def __init__(self, root):
-        super().__init__(root, title="f5b: 大模型正文流式生成 engine (纯渲染版)", geometry="750x550")
-
-    def setup_custom_widgets(self):
-        import tkinter as tk
-        from tkinter import ttk
-        padding = {'padx': 10, 'pady': 8}
-
-        frame_base = ttk.LabelFrame(self.root, text="1. 目标定位 (执行前需确保 f5a 已生成大纲)")
-        frame_base.pack(fill="x", **padding)
-        
-        ttk.Label(frame_base, text="目标项目名:").grid(row=0, column=0, sticky="w", padx=5, pady=5)
-        self.project_var = tk.StringVar()
-        ttk.Entry(frame_base, textvariable=self.project_var, width=25).grid(row=0, column=1, sticky="w", padx=5)
-        
-        ttk.Label(frame_base, text="本章章节名:").grid(row=1, column=0, sticky="w", padx=5, pady=5)
-        self.chapter_name_var = tk.StringVar()
-        ttk.Entry(frame_base, textvariable=self.chapter_name_var, width=25).grid(row=1, column=1, sticky="w", padx=5)
-
-        frame_model = ttk.LabelFrame(self.root, text="2. 生成参数")
-        frame_model.pack(fill="x", **padding)
-        
-        ttk.Label(frame_model, text="推理模型:").grid(row=0, column=0, sticky="w", padx=10, pady=5)
-        self.model_var = tk.StringVar(value="deepseek-chat")
-        ttk.Radiobutton(frame_model, text="DeepSeek V3 (标准)", variable=self.model_var, value="deepseek-chat").grid(row=0, column=1, sticky="w", padx=10)
-        ttk.Radiobutton(frame_model, text="DeepSeek R1 (推理)", variable=self.model_var, value="deepseek-reasoner").grid(row=0, column=2, sticky="w", padx=10)
-        
-        self.btn_process = ttk.Button(self.root, text="执行正文流式生成", command=lambda: self.start_process_thread(self.btn_process))
-        self.btn_process.pack(pady=10)
-        
-        # 覆盖基类的 log_text 配置以适应 Consolas 字体
-        self.log_text.config(bg="#1e1e1e", fg="#d4d4d4", font=("Consolas", 10), height=15)
-        self.log("系统就绪。已接入 core 层的流式驱动。等待数据返回...")
-
-    def log(self, message, append=False):
-        """覆盖基类 log 以支持流式追加"""
-        import tkinter as tk
-        def _task():
-            self.log_text.config(state="normal")
-            if append:
-                self.log_text.insert(tk.END, message)
-            else:
-                self.log_text.insert(tk.END, message + "\n")
-            self.log_text.see(tk.END)
-            self.log_text.config(state="disabled")
-        
-        # 确保在主线程更新 UI
-        if threading.current_thread() is threading.main_thread():
-            _task()
-        else:
-            self.root.after(0, _task)
+class NovelGenerationApp(HeadlessBaseTask):
+    def __init__(self):
+        super().__init__()
 
     def execute_logic(self):
-        import tkinter.messagebox as messagebox
-        project_name = self.project_var.get().strip()
-        chapter_name = self.chapter_name_var.get().strip()
-        
-        if not project_name or not chapter_name:
-            self.log("[ERROR] 项目名和章节名为必填项！")
-            return
-            
-        model = self.model_var.get()
-        self.execute_generation(project_name, chapter_name, model, self.log)
+        pass # 此方法已完全交由 Web API 层通过 run_headless 静默执行
 
     @staticmethod
     def read_file_safe(filepath, max_len=None):
@@ -282,7 +224,6 @@ def run_headless(project_name, chapter_name, model="deepseek-chat", export_promp
     )
     if not success: sys.exit(1)
 
-import threading
 if __name__ == "__main__":
     safe_run_app(
         app_class=NovelGenerationApp,

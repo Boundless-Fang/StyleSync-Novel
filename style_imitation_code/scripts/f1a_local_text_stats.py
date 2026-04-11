@@ -7,7 +7,7 @@ from collections import Counter
 import jieba
 import jieba.posseg as pseg
 
-from core._core_gui_runner import safe_run_app, inject_env, ThreadSafeBaseGUI
+from core._core_cli_runner import safe_run_app, inject_env, HeadlessBaseTask
 inject_env()
 
 from core._core_config import BASE_DIR, PROJECT_ROOT, REFERENCE_DIR, STYLE_DIR, PROJ_DIR
@@ -40,43 +40,18 @@ class WelfordStats:
     def std_dev(self):
         return math.sqrt(self.variance())
 
-class NovelMetricsAnalyzerApp(ThreadSafeBaseGUI):
-    def __init__(self, root):
-        super().__init__(root, title="f1a: 文本物理指标与TTR统计 (低内存流式处理版)", geometry="600x450")
-
-    def setup_custom_widgets(self):
-        import tkinter as tk
-        from tkinter import ttk, filedialog
-        padding = {'padx': 10, 'pady': 8}
-        
-        for directory in [REFERENCE_DIR, STYLE_DIR, PROJ_DIR]:
-            os.makedirs(directory, exist_ok=True)
-
-        frame_file = ttk.LabelFrame(self.root, text="选择小说源文件 (reference_novels)")
-        frame_file.pack(fill="x", **padding)
-
-        self.file_path_var = tk.StringVar()
-        ttk.Entry(frame_file, textvariable=self.file_path_var, state="readonly", width=55).grid(row=0, column=0, padx=5, pady=10)
-        ttk.Button(frame_file, text="浏览...", command=self.select_file).grid(row=0, column=1, padx=5, pady=10)
-
-        self.btn_run = ttk.Button(self.root, text="开始计算物理指标与TTR", command=lambda: self.start_process_thread(self.btn_run))
-        self.btn_run.pack(pady=10)
-
-    def select_file(self):
-        import tkinter as tk
-        from tkinter import filedialog
-        init_dir = REFERENCE_DIR if os.path.exists(REFERENCE_DIR) else BASE_DIR
-        path = filedialog.askopenfilename(initialdir=init_dir, title="选择小说文件", filetypes=[("Text Files", "*.txt")])
-        if path:
-            self.file_path_var.set(path)
-            self.log(f"已选择: {os.path.basename(path)}")
+class NovelMetricsAnalyzerApp(HeadlessBaseTask):
+    def __init__(self):
+        super().__init__()
 
     def execute_logic(self):
-        import tkinter.messagebox as messagebox
-        file_path = self.file_path_var.get()
+        pass # 此方法已完全交由 Web API 层通过 run_headless 静默执行
+
+    @staticmethod
+    def run_analysis(file_path, log_func=print):
         if not file_path:
-            self.log("[ERROR] 请先选择小说源文件！")
-            return
+            log_func("[ERROR] 请先选择小说源文件！")
+            return False
 
         try:
             novel_name = os.path.splitext(os.path.basename(file_path))[0]
@@ -86,12 +61,12 @@ class NovelMetricsAnalyzerApp(ThreadSafeBaseGUI):
             ref_path = os.path.join(style_novel_dir, "reference.txt")
             if not os.path.exists(ref_path):
                 shutil.copy2(file_path, ref_path)
-                self.log(">> 已自动备份原文至 reference.txt")
+                log_func(">> 已自动备份原文至 reference.txt")
 
             out_dir = os.path.join(style_novel_dir, "statistics")
             os.makedirs(out_dir, exist_ok=True)
 
-            self.log(f"开始分析《{novel_name}》物理指标 (流式处理)...")
+            log_func(f"开始分析《{novel_name}》物理指标 (流式处理)...")
             
             # 使用 smart_yield_text 替代一次性读取
             p_stats = WelfordStats()
@@ -246,33 +221,23 @@ class NovelMetricsAnalyzerApp(ThreadSafeBaseGUI):
             save_path = os.path.join(out_dir, "统计指标.txt")
             atomic_write(save_path, "\n".join(report), data_type='text')
 
-            self.log(f"\n[INFO] 指标计算完成！文件保存至: {save_path}")
-            messagebox.showinfo("完成", f"物理指标分析完毕。")
+            log_func(f"\n[INFO] 指标计算完成！文件保存至: {save_path}")
+            return True
         except Exception as e:
-            self.log(f"[ERROR] 错误: {str(e)}")
+            log_func(f"[ERROR] 错误: {str(e)}")
             import traceback
             traceback.print_exc()
+            return False
 
 def run_headless(target_file):
     import sys
     if not os.path.exists(target_file):
+        print(f"[ERROR] 未找到目标文件: {target_file}")
         sys.exit(1)
         
-    novel_name = os.path.splitext(os.path.basename(target_file))[0]
-    style_novel_dir = os.path.join(STYLE_DIR, f"{novel_name}_style_imitation")
-    os.makedirs(style_novel_dir, exist_ok=True)
-    
-    ref_path = os.path.join(style_novel_dir, "reference.txt")
-    if not os.path.exists(ref_path):
-        shutil.copy2(target_file, ref_path)
-
-    out_dir = os.path.join(style_novel_dir, "statistics")
-    os.makedirs(out_dir, exist_ok=True)
-
-    # 在无头模式下复用 execute_logic 的逻辑（简化版）
-    # ... (此处省略重复的统计逻辑，实际应用中建议将统计逻辑抽取为独立函数)
-    # 为保持示例简洁，此处暂不实现完整的无头统计逻辑，或直接实例化 App 调用
-    pass
+    success = NovelMetricsAnalyzerApp.run_analysis(target_file)
+    if not success:
+        sys.exit(1)
 
 if __name__ == "__main__":
     safe_run_app(app_class=NovelMetricsAnalyzerApp, headless_func=run_headless, target_file="")

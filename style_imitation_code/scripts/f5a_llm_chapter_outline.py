@@ -1,7 +1,7 @@
 import os
 import json
 
-from core._core_gui_runner import safe_run_app, inject_env, ThreadSafeBaseGUI
+from core._core_cli_runner import safe_run_app, inject_env, HeadlessBaseTask
 inject_env()
 
 from core._core_config import PROJ_DIR
@@ -10,56 +10,12 @@ from core._core_llm import call_deepseek_api
 from core._core_rag import RAGRetriever
 import numpy as np
 
-class ChapterOutlineApp(ThreadSafeBaseGUI):
-    def __init__(self, root):
-        super().__init__(root, title="f5a: 章节详细大纲生成 (严格角色控制与双轨RAG版)", geometry="750x650")
-
-    def setup_custom_widgets(self):
-        import tkinter as tk
-        from tkinter import ttk
-        padding = {'padx': 10, 'pady': 8}
-
-        frame_base = ttk.LabelFrame(self.root, text="1. 基础定位")
-        frame_base.pack(fill="x", **padding)
-        
-        ttk.Label(frame_base, text="目标项目名:").grid(row=0, column=0, sticky="w", padx=5, pady=5)
-        self.project_var = tk.StringVar()
-        ttk.Entry(frame_base, textvariable=self.project_var, width=30).grid(row=0, column=1, sticky="w", padx=5)
-        
-        ttk.Label(frame_base, text="本章章节名:").grid(row=1, column=0, sticky="w", padx=5, pady=5)
-        self.chapter_name_var = tk.StringVar()
-        ttk.Entry(frame_base, textvariable=self.chapter_name_var, width=30).grid(row=1, column=1, sticky="w", padx=5)
-
-        frame_brief = ttk.LabelFrame(self.root, text="2. 本章核心剧情简述 (严格匹配显式出场角色)")
-        frame_brief.pack(fill="x", **padding)
-        self.brief_text = tk.Text(frame_brief, height=8, width=90)
-        self.brief_text.pack(padx=5, pady=5)
-        self.brief_text.insert("1.0", "在这里输入本章打算写什么的简要构思...\n提示：仅当此处精确出现角色全名时，系统才会为其加载深度角色卡。")
-
-        frame_model = ttk.LabelFrame(self.root, text="3. 执行配置")
-        frame_model.pack(fill="x", **padding)
-        self.model_var = tk.StringVar(value="deepseek-chat")
-        ttk.Radiobutton(frame_model, text="DeepSeek V3 (标准)", variable=self.model_var, value="deepseek-chat").pack(side=tk.LEFT, padx=10, pady=5)
-        ttk.Radiobutton(frame_model, text="DeepSeek R1 (推理)", variable=self.model_var, value="deepseek-reasoner").pack(side=tk.LEFT, padx=10, pady=5)
-        
-        self.btn_process = ttk.Button(self.root, text="智能解析背景并生成精细大纲", command=lambda: self.start_process_thread(self.btn_process))
-        self.btn_process.pack(pady=10)
-        self.log("系统就绪。已启用双轨 RAG 检索，确保世界观背景与前文剧情同步连贯。")
+class ChapterOutlineApp(HeadlessBaseTask):
+    def __init__(self):
+        super().__init__()
 
     def execute_logic(self):
-        import tkinter.messagebox as messagebox
-        project_name = self.project_var.get().strip()
-        chapter_name = self.chapter_name_var.get().strip()
-        chapter_brief = self.brief_text.get("1.0", "end").strip()
-        
-        if not project_name or not chapter_name or len(chapter_brief) < 5:
-            self.log("[ERROR] 项目名、章节名及有效的剧情简述均为必填！")
-            return
-            
-        model = self.model_var.get()
-        result = self.execute_generation(project_name, chapter_name, chapter_brief, model, self.log)
-        if result:
-            messagebox.showinfo("完成", f"【{chapter_name}】详细大纲生成完毕！")
+        pass # 此方法已完全交由 Web API 层通过 run_headless 静默执行
 
     @staticmethod
     def read_file_safe(filepath, max_len=None):

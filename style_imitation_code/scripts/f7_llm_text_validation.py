@@ -2,64 +2,18 @@ import os
 import re
 import json
 
-from core._core_gui_runner import safe_run_app, inject_env, ThreadSafeBaseGUI
+from core._core_cli_runner import safe_run_app, inject_env, HeadlessBaseTask
 inject_env()
 
 from core._core_config import PROJ_DIR, STYLE_DIR
 from core._core_utils import smart_read_text
 
-class TextValidationApp(ThreadSafeBaseGUI):
-    def __init__(self, root):
-        super().__init__(root, title="f7: 全局文本智能校验 (宽松模式)", geometry="650x450")
-
-    def setup_custom_widgets(self):
-        import tkinter as tk
-        from tkinter import ttk
-        padding = {'padx': 10, 'pady': 8}
-
-        frame_base = ttk.LabelFrame(self.root, text="1. 校验目标定位")
-        frame_base.pack(fill="x", **padding)
-        
-        ttk.Label(frame_base, text="项目名称:").grid(row=0, column=0, sticky="w", padx=5, pady=5)
-        self.project_var = tk.StringVar()
-        ttk.Entry(frame_base, textvariable=self.project_var, width=25).grid(row=0, column=1, sticky="w", padx=5)
-        
-        ttk.Label(frame_base, text="章节名称(针对f5a/f5b):").grid(row=1, column=0, sticky="w", padx=5, pady=5)
-        self.chapter_var = tk.StringVar()
-        ttk.Entry(frame_base, textvariable=self.chapter_var, width=25).grid(row=1, column=1, sticky="w", padx=5)
-
-        ttk.Label(frame_base, text="目标脚本节点:").grid(row=2, column=0, sticky="w", padx=5, pady=5)
-        self.script_type_var = tk.StringVar(value="f5b")
-        nodes = ["f0", "f1a", "f1b", "f2a", "f2b", "f3a", "f3b", "f3c", "f4a", "f4b", "f5a", "f5b"]
-        ttk.Combobox(frame_base, textvariable=self.script_type_var, values=nodes, width=23, state="readonly").grid(row=2, column=1, sticky="w", padx=5)
-
-        frame_mode = ttk.LabelFrame(self.root, text="2. 校验模式")
-        frame_mode.pack(fill="x", **padding)
-        self.mode_var = tk.StringVar(value="loose")
-        ttk.Radiobutton(frame_mode, text="宽松模式 (仅物理硬校验)", variable=self.mode_var, value="loose").pack(side=tk.LEFT, padx=10, pady=5)
-        ttk.Radiobutton(frame_mode, text="严格模式 (LLM深度巡检 - 暂未开放)", variable=self.mode_var, value="strict", state="disabled").pack(side=tk.LEFT, padx=10, pady=5)
-        
-        self.btn_process = ttk.Button(self.root, text="执行校验", command=lambda: self.start_process_thread(self.btn_process))
-        self.btn_process.pack(pady=10)
-        self.log("系统就绪。当前为宽松模式，仅执行确定性的规则与格式匹配。")
+class TextValidationApp(HeadlessBaseTask):
+    def __init__(self):
+        super().__init__()
 
     def execute_logic(self):
-        import tkinter.messagebox as messagebox
-        project_name = self.project_var.get().strip()
-        script_type = self.script_type_var.get().strip()
-        chapter_name = self.chapter_var.get().strip()
-        
-        if not project_name:
-            self.log("[ERROR] 项目名称为必填项！")
-            return
-            
-        mode = self.mode_var.get()
-        result = self.execute_validation(project_name, script_type, chapter_name, mode, self.log)
-        
-        if result.get("pass"):
-            messagebox.showinfo("校验通过", f"[{script_type}] 校验已通过。")
-        else:
-            messagebox.showerror("校验失败", f"[{script_type}] 校验未通过：\n{result.get('feedback')}")
+        pass # 此方法已完全交由 Web API 层通过 run_headless 静默执行
 
     @staticmethod
     def get_safe_project_dir(project_name):

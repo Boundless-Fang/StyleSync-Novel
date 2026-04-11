@@ -2,8 +2,12 @@ import os
 import json
 import asyncio
 import re
+import subprocess
 from datetime import datetime
 from .config import PROJ_DIR
+
+# 引入核心层的原子写与安全模块
+from core._core_utils import atomic_write, mask_sensitive_info
 
 # 系统全局并发控制与防护
 background_semaphore = asyncio.Semaphore(1)
@@ -31,18 +35,19 @@ def load_tasks_safe():
                     t_info["status"] = "failed"
                     t_info["error"] = "系统拦截：检测到服务端曾发生重启或意外崩溃，该任务物理进程已丢失。"
             TASKS.update(loaded_tasks)
-        except Exception as e:
-            print(f"[WARN] 历史任务数据库加载失败，可能文件已损坏: {e}")
+        except OSError as e:
+            print(f"[WARN] 历史任务数据库加载失败，文件系统读取异常: {mask_sensitive_info(str(e))}")
+        except json.JSONDecodeError as e:
+            print(f"[WARN] 历史任务数据库加载失败，JSON格式已损坏: {str(e)}")
 
 async def add_task_safe(task_id: str, task_info: dict):
-    """提供给外部路由的安全写入接口，防止并发导致字典大小突变"""
+    """提供给外部路由的安全写入接口"""
     async with tasks_state_lock:
         TASKS[task_id] = task_info
 
 async def save_and_prune_tasks_async():
-    """防线升级：缩减临界区，分离状态快照与无锁落盘，消除并发死锁"""
+    """防线升级：缩减临界区，分离状态快照与无锁落盘"""
     async with db_save_lock:
-        # 【关键修复】：仅在生成数据快照时持有状态锁
         async with tasks_state_lock:
             finished_tasks = {
                 k: v for k, v in TASKS.items()
@@ -59,24 +64,19 @@ async def save_and_prune_tasks_async():
                 for k in keys_to_delete:
                     TASKS.pop(k, None)
 
-            # 内存级别字典浅拷贝，纳秒级定格当前状态
             snapshot = {k: v.copy() for k, v in TASKS.items()}
 
-        # 【关键修复】：剥离 I/O 操作至状态锁外部
-        def _write_to_disk():
-            temp_path = TASKS_DB_PATH + ".tmp"
-            with open(temp_path, 'w', encoding='utf-8') as f:
-                json.dump(snapshot, f, ensure_ascii=False, indent=2)
-            os.replace(temp_path, TASKS_DB_PATH)
-
         try:
-            # 此时 tasks_state_lock 已释放，其他请求可无阻塞读取 TASKS 字典
-            await asyncio.to_thread(_write_to_disk)
-        except OSError as e:
-            print(f"[ERROR] 任务状态落盘 I/O 异常: {e}")
+            await asyncio.to_thread(atomic_write, TASKS_DB_PATH, snapshot, 'json')
+        except (RuntimeError, OSError) as e:
+            print(f"[ERROR] 任务状态落盘失败: {mask_sensitive_info(str(e))}")
 
 async def run_task_safely(task_id: str, cmd_list: list, api_key: str = None):
-    # 初始化运行状态时加锁保护
+    """
+    核心异步调度器 (已重构)：
+    1. 彻底废除外部 Thread 监控，消除 PID 错杀风险与线程资源泄露。
+    2. 利用 asyncio.wait_for 实现原生句柄级的超时销毁。
+    """
     async with tasks_state_lock:
         if task_id in TASKS:
             TASKS[task_id]["status"] = "running"
@@ -102,25 +102,44 @@ async def run_task_safely(task_id: str, cmd_list: list, api_key: str = None):
             )
             
             async def pipe_reader(stream, key):
+                buffer = []
+                flush_counter = 0
                 while True:
-                    line = await stream.readline()
-                    if not line:
+                    try:
+                        line = await stream.readline()
+                        if not line: break
+                    except (asyncio.LimitOverrunError, OSError):
                         break
                     
                     try:
                         decoded_line = line.decode('utf-8')
                     except UnicodeDecodeError:
                         decoded_line = line.decode('gbk', errors='replace')
-                        
-                    async with tasks_state_lock:
-                        if task_id in TASKS:
-                            TASKS[task_id][key] += decoded_line
-                            if key == "stdout":
-                                token_matches = re.findall(r'(?:[Tt]okens?|消耗)[:=：\s]*(\d+)', decoded_line)
-                                if token_matches:
+                    
+                    buffer.append(decoded_line)
+                    flush_counter += 1
+                    
+                    if key == "stdout":
+                        token_matches = re.findall(r'(?:[Tt]okens?|消耗)[:=：\s]*(\d+)', decoded_line)
+                        if token_matches:
+                            async with tasks_state_lock:
+                                if task_id in TASKS:
                                     TASKS[task_id]["tokens"] = int(token_matches[-1])
 
+                    if flush_counter >= 50:
+                        async with tasks_state_lock:
+                            if task_id in TASKS:
+                                TASKS[task_id][key] += "".join(buffer)
+                        buffer.clear()
+                        flush_counter = 0
+
+                if buffer:
+                    async with tasks_state_lock:
+                        if task_id in TASKS:
+                            TASKS[task_id][key] += "".join(buffer)
+
             try:
+                # 设定 1800 秒强制超时，通过原生 Process 对象管理生命周期
                 await asyncio.wait_for(
                     asyncio.gather(
                         pipe_reader(process.stdout, "stdout"),
@@ -133,31 +152,31 @@ async def run_task_safely(task_id: str, cmd_list: list, api_key: str = None):
                 async with tasks_state_lock:
                     if task_id in TASKS:
                         TASKS[task_id]["returncode"] = process.returncode
-                        if process.returncode == 0:
-                            TASKS[task_id]["status"] = "success"
-                        else:
-                            TASKS[task_id]["status"] = "failed"
-                            
-            except asyncio.TimeoutError:
-                # 【核心修复】：阶梯式平滑终止机制
-                try:
-                    process.terminate()  # 发送 SIGTERM，允许子进程执行 finally 和 os.replace
-                    await asyncio.sleep(5.0)  # 给予 5 秒事务回滚与宽限期
-                    if process.returncode is None:
-                        process.kill()  # 宽限期后若仍未退出，执行物理强杀 (SIGKILL)
-                except Exception:
+                        TASKS[task_id]["status"] = "success" if process.returncode == 0 else "failed"
+                                
+            except asyncio.TimeoutError: 
+                # 方案一核心逻辑：直接操作进程句柄，而非盲杀 PID
+                try: 
+                    process.kill() # 强制销毁
+                    await process.wait() # 确保句柄释放
+                except OSError: 
                     pass
                     
                 async with tasks_state_lock:
                     if task_id in TASKS:
                         TASKS[task_id]["status"] = "failed"
-                        TASKS[task_id]["error"] = "超时拦截：任务执行超过设定时间，已触发平滑终止与强制终结，底层写盘已受事务保护。"
+                        TASKS[task_id]["error"] = "超时拦截：任务执行超过 30 分钟限制，已由系统通过句柄安全销毁。"
                 
-    except Exception as e:
+    except OSError:
         async with tasks_state_lock:
             if task_id in TASKS:
                 TASKS[task_id]["status"] = "error"
-                TASKS[task_id]["error"] = f"系统执行异常: {str(e)}"
+                TASKS[task_id]["error"] = "系统子进程调度异常: 权限不足或环境受限。"
+    except Exception:
+        async with tasks_state_lock:
+            if task_id in TASKS:
+                TASKS[task_id]["status"] = "error"
+                TASKS[task_id]["error"] = "系统执行异常: 上下文保护错误。"
     finally:
         async with tasks_state_lock:
             if task_id in TASKS:

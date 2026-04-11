@@ -7,57 +7,19 @@ import jieba.posseg as pseg
 import faiss
 import numpy as np
 
-from core._core_gui_runner import safe_run_app, inject_env, ThreadSafeBaseGUI
+from core._core_cli_runner import safe_run_app, inject_env, HeadlessBaseTask
 inject_env()
 
 from core._core_config import BASE_DIR, PROJECT_ROOT, REFERENCE_DIR, STYLE_DIR, PROJ_DIR
 from core._core_utils import smart_read_text, atomic_write
 from core._core_rag import RAGRetriever
 
-class LocalPlotCompressionApp(ThreadSafeBaseGUI):
-    def __init__(self, root):
-        super().__init__(root, title="f4b: 动态剧情切分与分层检索库构建 (纯本地降本版)", geometry="680x420")
-
-    def setup_custom_widgets(self):
-        import tkinter as tk
-        from tkinter import ttk, filedialog
-        padding = {'padx': 10, 'pady': 8}
-
-        frame_original = ttk.LabelFrame(self.root, text="1. 选择小说原文 (.txt)")
-        frame_original.pack(fill="x", **padding)
-        self.original_var = tk.StringVar()
-        ttk.Entry(frame_original, textvariable=self.original_var, state="readonly", width=65).grid(row=0, column=0, padx=5, pady=10)
-        ttk.Button(frame_original, text="浏览...", command=self.select_original).grid(row=0, column=1, padx=5, pady=10)
-
-        frame_settings = ttk.LabelFrame(self.root, text="2. 切分与提取策略 (纯本地，0 API 消耗)")
-        frame_settings.pack(fill="x", **padding)
-        ttk.Label(frame_settings, text="打包阈值(字数):").grid(row=0, column=0, sticky="w", padx=10, pady=5)
-        self.chunk_size_var = tk.IntVar(value=10000)
-        ttk.Entry(frame_settings, textvariable=self.chunk_size_var, width=15).grid(row=0, column=1, sticky="w", pady=5)
-        ttk.Label(frame_settings, text="*系统将动态合并章节，超过此字数即切分打包", foreground="gray").grid(row=0, column=2, sticky="w", padx=10)
-        
-        self.btn_process = ttk.Button(self.root, text="执行章节切分与构建本地检索库", command=lambda: self.start_process_thread(self.btn_process))
-        self.btn_process.pack(pady=10)
-        self.log("系统就绪。本环节将采用统一的 1024 维 BAAI 模型构建同人库。已启用双重内存防爆机制。")
-
-    def select_original(self):
-        import tkinter as tk
-        from tkinter import filedialog
-        init_dir = REFERENCE_DIR if os.path.exists(REFERENCE_DIR) else BASE_DIR
-        path = filedialog.askopenfilename(initialdir=init_dir, filetypes=[("Text Files", "*.txt")])
-        if path: self.original_var.set(path)
+class LocalPlotCompressionApp(HeadlessBaseTask):
+    def __init__(self):
+        super().__init__()
 
     def execute_logic(self):
-        import tkinter.messagebox as messagebox
-        original_path = self.original_var.get()
-        chunk_size = self.chunk_size_var.get()
-        if not original_path:
-            self.log("[ERROR] 请先选择原文文件！")
-            return
-            
-        result = self.execute_compression(original_path, chunk_size, self.log, project_name=None)
-        if result:
-            messagebox.showinfo("完成", "本地动态分层检索数据库建立完毕！")
+        pass # 此方法已完全交由 Web API 层通过 run_headless 静默执行
 
     @staticmethod
     def load_global_vocab(vocab_path):

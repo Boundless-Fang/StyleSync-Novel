@@ -14,8 +14,6 @@ from .models import SettingCompletionRequest, ChapterOutlineRequest, NovelGenera
 
 from core._core_utils import (
     resolve_sandbox_path, 
-    create_sandbox_ticket, 
-    cleanup_sandbox_ticket, 
     mask_sensitive_info, 
     validate_safe_param
 )
@@ -23,14 +21,6 @@ from .tasks import TASKS, run_task_safely, load_tasks_safe, save_and_prune_tasks
 
 router = APIRouter()
 load_tasks_safe() 
-
-# 异步守护与沙箱垃圾回收封装
-async def run_task_with_cleanup(task_id: str, cmd_list: list, x_api_key: str, ticket_ids: list):
-    try:
-        await run_task_safely(task_id, cmd_list, x_api_key)
-    finally:
-        for tid in ticket_ids:
-            cleanup_sandbox_ticket(tid)
 
 # ==========================================
 # 自动化工作流 API (后台执行调度)
@@ -43,10 +33,37 @@ async def get_references():
 @router.post("/api/references/upload")
 async def upload_reference(file: UploadFile = File(...)):
     try:
-        file_path = os.path.join(REF_DIR, file.filename)
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-        return {"status": "success", "filename": file.filename}
+        # 强制剥离路径节点，防范目录穿越 (Path Traversal) 注入
+        safe_filename = os.path.basename(file.filename)
+        if not safe_filename:
+            raise ValueError("文件名无效或未被系统正确接收")
+
+        # 白名单扩展名严格校验
+        name, ext = os.path.splitext(safe_filename)
+        allowed_exts = ('.txt', '.md')
+        if ext.lower() not in allowed_exts:
+            raise ValueError(f"安全拦截：仅允许上传 {allowed_exts} 格式的参考文本")
+
+        # 防范超长恶意文件名引发 Windows 底层 260 字符路径报错
+        if len(name) > 80:
+            safe_filename = name[:80] + ext
+
+        file_path = os.path.join(REF_DIR, safe_filename)
+        
+        # 将阻塞型 OS 级别 I/O 操作隔离到局部函数，通过 to_thread 卸载
+        def _write_uploaded_file():
+            with open(file_path, "wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
+                
+        await asyncio.to_thread(_write_uploaded_file)
+            
+        return {"status": "success", "filename": safe_filename}
+        
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except OSError as oe:
+        print(f"[ERROR] 参考文本上传物理落盘失败: {mask_sensitive_info(str(oe))}")
+        raise HTTPException(status_code=500, detail="文件系统存储阶段发生读写异常或权限被拒")
     except Exception as e:
         raise HTTPException(status_code=500, detail=mask_sensitive_info(str(e)))
 
@@ -75,12 +92,12 @@ async def run_f4a_completion(req: SettingCompletionRequest, x_api_key: str = Hea
             
         json_string = json.dumps(req.form_data, ensure_ascii=False)
         
+        # 仅校验边界并获取绝对路径，废除沙箱票据隔离机制
         target_path = resolve_sandbox_path(REF_DIR, req.target_file, allowed_extensions=('.txt', '.md', '.json')) 
-        ticket_id = create_sandbox_ticket(target_path)
         
         cmd = [
             sys.executable, script_path, 
-            "--target_file", ticket_id,
+            "--target_file", target_path,
             "--mode", mode,
             "--json_data", json_string,
             "--model", model
@@ -98,11 +115,13 @@ async def run_f4a_completion(req: SettingCompletionRequest, x_api_key: str = Hea
         }
         
         asyncio.create_task(save_and_prune_tasks_async()) 
-        asyncio.create_task(run_task_with_cleanup(task_id, cmd, x_api_key, [ticket_id]))
+        asyncio.create_task(run_task_safely(task_id, cmd, x_api_key))
         return {"status": "started", "task_id": task_id, "message": f"任务已加入执行队列: f4a ({mode}模式)"}
         
-    except Exception as e: 
+    except ValueError as e: 
         raise HTTPException(status_code=403, detail=mask_sensitive_info(str(e))) 
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=mask_sensitive_info(str(e)))
 
 @router.post("/api/scripts/f5a_outline")
 async def run_f5a_outline(req: ChapterOutlineRequest, x_api_key: str = Header(None)):
@@ -134,11 +153,13 @@ async def run_f5a_outline(req: ChapterOutlineRequest, x_api_key: str = Header(No
         }
 
         asyncio.create_task(save_and_prune_tasks_async())
-        asyncio.create_task(run_task_with_cleanup(task_id, cmd, x_api_key, []))
+        asyncio.create_task(run_task_safely(task_id, cmd, x_api_key))
         return {"status": "started", "task_id": task_id, "message": f"任务已加入执行队列: f5a 生成大纲"}
         
-    except Exception as e:
+    except ValueError as e:
         raise HTTPException(status_code=403, detail=mask_sensitive_info(str(e)))
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=mask_sensitive_info(str(e)))
 
 @router.post("/api/scripts/f5b_prompt_export")
 async def export_f5b_prompt(req: NovelGenerationRequest):
@@ -158,7 +179,9 @@ async def export_f5b_prompt(req: NovelGenerationRequest):
                 with open(project_config_path, "r", encoding="utf-8") as f:
                     config = json.load(f)
                     branch_mode = validate_safe_param(config.get("mode", "同人"))
-            except:
+            except OSError:
+                pass
+            except json.JSONDecodeError:
                 pass
 
         cmd = [
@@ -179,11 +202,13 @@ async def export_f5b_prompt(req: NovelGenerationRequest):
         stdout, stderr = await process.communicate()
         
         if process.returncode != 0:
-            raise Exception(f"包组装异常: {stderr.decode('utf-8', errors='replace')}")
+            raise RuntimeError(f"包组装异常: {stderr.decode('utf-8', errors='replace')}")
             
         return {"prompt": stdout.decode('utf-8', errors='replace')}
         
-    except Exception as e:
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=mask_sensitive_info(str(e)))
+    except (OSError, RuntimeError) as e:
         raise HTTPException(status_code=500, detail=mask_sensitive_info(str(e)))
 
 @router.post("/api/scripts/f5b_generate")
@@ -204,7 +229,9 @@ async def run_f5b_generate(req: NovelGenerationRequest, x_api_key: str = Header(
                 with open(project_config_path, "r", encoding="utf-8") as f:
                     config = json.load(f)
                     branch_mode = validate_safe_param(config.get("mode", "同人"))
-            except:
+            except OSError:
+                pass
+            except json.JSONDecodeError:
                 pass
 
         cmd = [
@@ -225,11 +252,13 @@ async def run_f5b_generate(req: NovelGenerationRequest, x_api_key: str = Header(
         }
         
         asyncio.create_task(save_and_prune_tasks_async())
-        asyncio.create_task(run_task_with_cleanup(task_id, cmd, x_api_key, [])) 
+        asyncio.create_task(run_task_safely(task_id, cmd, x_api_key)) 
         return {"status": "started", "task_id": task_id, "message": f"任务已加入执行队列: f5b 正文生成"}
         
-    except Exception as e:
+    except ValueError as e:
         raise HTTPException(status_code=403, detail=mask_sensitive_info(str(e)))
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=mask_sensitive_info(str(e)))
 
 @router.post("/api/scripts/{script_type}") 
 async def run_script( 
@@ -275,11 +304,10 @@ async def run_script(
         if not os.path.exists(script_path): 
             return {"error": f"系统拦截：未找到物理脚本"} 
         
-        # 沙箱过滤与票据生成
-        ticket_id = "" 
+        # 仅获取沙箱受限绝对路径，禁止生成票据
+        target_path = "" 
         if target_file: 
             target_path = resolve_sandbox_path(REF_DIR, target_file, allowed_extensions=('.txt', '.md', '.json', '.index')) 
-            ticket_id = create_sandbox_ticket(target_path)
             
         target_name = os.path.basename(target_file) if target_file else "无目标文件" 
         if script_type == "f3c" and character: 
@@ -319,16 +347,13 @@ async def run_script(
                 "tokens": 0 
             } 
             asyncio.create_task(save_and_prune_tasks_async())
-            # 命中缓存提前阻断，在此处强制清理沙箱废票
-            if ticket_id:
-                cleanup_sandbox_ticket(ticket_id)
             return {"status": "started", "task_id": task_id, "message": "检测到缓存，已自动跳过"} 
         # ======================================================== 
         
         cmd = [sys.executable, script_path] 
-        # 传入票据而非明文路径
-        if ticket_id:
-            cmd.extend(["--target_file", ticket_id])
+        # 恢复物理绝对路径的直接传递
+        if target_path:
+            cmd.extend(["--target_file", target_path])
             
         if project_name: 
             cmd.extend(["--project", project_name]) 
@@ -354,9 +379,10 @@ async def run_script(
         } 
         
         asyncio.create_task(save_and_prune_tasks_async())
-        # 在闭包中执行，确保沙箱生命周期与命令同步
-        asyncio.create_task(run_task_with_cleanup(task_id, cmd, x_api_key, [ticket_id] if ticket_id else [])) 
+        asyncio.create_task(run_task_safely(task_id, cmd, x_api_key)) 
         return {"status": "started", "task_id": task_id, "message": f"任务已加入执行队列: {script_name}"}
 
-    except Exception as e: 
+    except ValueError as e: 
         raise HTTPException(status_code=403, detail=mask_sensitive_info(str(e)))
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=mask_sensitive_info(str(e)))
