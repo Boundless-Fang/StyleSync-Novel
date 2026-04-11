@@ -16,7 +16,8 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
+# 【变更】：移除 Jinja2Templates，引入 FileResponse
+from fastapi.responses import FileResponse
 
 from api import router
 from api.config import CODE_DIR
@@ -38,13 +39,11 @@ app.include_router(router)
 # 1. 静态资源（js, css）必须移到 /static 路径下
 app.mount("/static", StaticFiles(directory=os.path.join(CODE_DIR, "frontend")), name="static")
 
-# 2. 声明 Jinja2 模板引擎目录
-templates = Jinja2Templates(directory=os.path.join(CODE_DIR, "frontend"))
-
-# 3. 根路由交给模板引擎，它会自动把 components 里的 html 拼装好再发给浏览器
+# 【变更】：废弃 Jinja2，直接以纯静态文件形式返回 HTML，彻底切断与 Vue {{ }} 语法的冲突
 @app.get("/")
-async def serve_frontend(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+async def serve_frontend():
+    html_path = os.path.join(CODE_DIR, "frontend", "index.html")
+    return FileResponse(html_path)
 # ==============================================
 
 @app.on_event("startup")

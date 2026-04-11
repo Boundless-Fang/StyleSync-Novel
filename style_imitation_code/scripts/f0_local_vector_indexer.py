@@ -5,30 +5,18 @@ import numpy as np
 import faiss
 import re
 
-from core._core_gui_runner import safe_run_app, inject_env, ThreadSafeBaseGUI
+from core._core_cli_runner import safe_run_app, inject_env, HeadlessBaseTask
 inject_env()
 
 from core._core_config import REFERENCE_DIR, STYLE_DIR
 from core._core_utils import smart_read_text, atomic_write
 from core._core_rag import RAGRetriever
 
-class GlobalIndexerGUI(ThreadSafeBaseGUI):
-    def __init__(self, root):
-        super().__init__(root, title="f0: 全局向量索引构建", geometry="400x300")
-
-    def setup_custom_widgets(self):
-        from tkinter import ttk
-        import tkinter as tk
-        padding = {'padx': 10, 'pady': 8}
-        
-        ttk.Label(self.root, text="f0 环节目前主要用于后台索引构建，\n请通过命令行或 Web 界面调用。", justify="center").pack(expand=True, pady=10)
-        
-        self.btn_run = ttk.Button(self.root, text="手动开始构建索引 (需先配置 target_file)", state="disabled")
-        self.btn_run.pack(pady=10)
-        self.log("系统就绪。建议通过自动化流程触发此脚本。")
+class GlobalIndexerGUI(HeadlessBaseTask):
+    def __init__(self):
+        super().__init__()
 
     def execute_logic(self):
-        # 此脚本通常由外部通过 headless 模式调用，此处仅为结构完整性保留
         pass
 
     @staticmethod

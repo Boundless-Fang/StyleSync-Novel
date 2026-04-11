@@ -249,7 +249,9 @@ createApp({
             const aiMessage = { 
                 role: 'assistant', 
                 versions: [{ content: '' }], 
-                active_version: 0 
+                active_version: 0, 
+                last_scanned_index: 0,        // 新增：安全扫描游标 
+                matched_indices: new Set()    // 新增：利用 Set 进行绝对索引的物理去重 
             };
             
             currentChat.value.messages.push(aiMessage);
@@ -297,22 +299,29 @@ createApp({
 
                     aiMessage.versions[aiMessage.active_version].content += chunk;
                     
-                    const currentContent = aiMessage.versions[aiMessage.active_version].content;
-                    if (forbiddenRegex.value && currentContent.length > 0) {
-                        let matchCount = 0;
-                        for (let i = 0; i < currentContent.length; i += 1000) {
-                            const block = currentContent.slice(i, i + 1000);
-                            const matches = block.match(forbiddenRegex.value);
-                            if (matches) matchCount += matches.length;
-                        }
+                    const currentContent = aiMessage.versions[aiMessage.active_version].content; 
+                    if (forbiddenRegex.value && currentContent.length > 0) { 
+                        // 截取待扫描切片：留出 200 字符的绝对安全缓冲区，防止网络包截断长敏感词 
+                        const scanStart = Math.max(0, aiMessage.last_scanned_index - 200); 
+                        const testBlock = currentContent.slice(scanStart); 
                         
-                        currentChat.value.stats.local_hit_count = matchCount;
+                        // 使用 matchAll 获取所有匹配项及其相对索引 
+                        const matches = [...testBlock.matchAll(forbiddenRegex.value)]; 
+                        for (const match of matches) { 
+                            // 相对索引转换为全局绝对索引，存入 Set 自动去重 
+                            const absoluteIndex = scanStart + match.index; 
+                            aiMessage.matched_indices.add(absoluteIndex); 
+                        } 
                         
-                        if (matchCount >= config.value.forbiddenTolerance) {
-                            stopGeneration();
-                            aiMessage.versions[aiMessage.active_version].content += '\n\n<div class="p-3 bg-red-100 text-red-700 rounded border border-red-300 mt-2 font-bold"><i class="fa-solid fa-triangle-exclamation"></i> 内容触发安全拦截机制：敏感词命中次数 (' + matchCount + ') 已达上限。</div>';
-                            break;
-                        }
+                        // 更新游标与统计数据 
+                        aiMessage.last_scanned_index = currentContent.length; 
+                        currentChat.value.stats.local_hit_count = aiMessage.matched_indices.size; 
+                        
+                        if (aiMessage.matched_indices.size >= config.value.forbiddenTolerance) { 
+                            stopGeneration(); 
+                            aiMessage.versions[aiMessage.active_version].content += '\n\n<div class="p-3 bg-red-100 text-red-700 rounded border border-red-300 mt-2 font-bold"><i class="fa-solid fa-triangle-exclamation"></i> 内容触发安全拦截机制：敏感词命中次数 (' + aiMessage.matched_indices.size + ') 已达上限。</div>'; 
+                            break; 
+                        } 
                     }
 
                     scrollToBottom();

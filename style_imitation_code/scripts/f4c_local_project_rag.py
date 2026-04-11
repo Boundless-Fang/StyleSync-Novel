@@ -3,43 +3,19 @@ import json
 import faiss
 import numpy as np
 
-from core._core_gui_runner import safe_run_app, inject_env, ThreadSafeBaseGUI
+from core._core_cli_runner import safe_run_app, inject_env, HeadlessBaseTask
 inject_env()
 
 from core._core_config import PROJ_DIR
 from core._core_utils import smart_read_text, atomic_write
 from core._core_rag import RAGRetriever
 
-class ProjectContextIndexerApp(ThreadSafeBaseGUI):
-    def __init__(self, root):
-        super().__init__(root, title="f4c: 动态工程上下文检索库构建 (已生成正文 RAG)", geometry="600x350")
-
-    def setup_custom_widgets(self):
-        import tkinter as tk
-        from tkinter import ttk
-        padding = {'padx': 10, 'pady': 8}
-
-        frame_base = ttk.LabelFrame(self.root, text="1. 定位当前创作工程")
-        frame_base.pack(fill="x", **padding)
-        
-        ttk.Label(frame_base, text="目标项目名:").grid(row=0, column=0, sticky="w", padx=5, pady=10)
-        self.project_var = tk.StringVar()
-        ttk.Entry(frame_base, textvariable=self.project_var, width=40).grid(row=0, column=1, sticky="w", padx=5)
-
-        self.btn_process = ttk.Button(self.root, text="同步并构建项目上下文向量库", command=lambda: self.start_process_thread(self.btn_process))
-        self.btn_process.pack(pady=10)
-        self.log("系统就绪。本节点负责将项目已生成的正文同步至本地 RAG 数据库，防止大模型剧情失忆。")
+class ProjectContextIndexerApp(HeadlessBaseTask):
+    def __init__(self):
+        super().__init__()
 
     def execute_logic(self):
-        import tkinter.messagebox as messagebox
-        project_name = self.project_var.get().strip()
-        if not project_name:
-            self.log("[ERROR] 项目名称为必填项！")
-            return
-            
-        result = self.execute_indexing(project_name, self.log)
-        if result:
-            messagebox.showinfo("完成", f"【{project_name}】上下文向量库更新完毕！")
+        pass # 此方法已完全交由 Web API 层通过 run_headless 静默执行
 
     @staticmethod
     def chunk_text(text, max_len=800):

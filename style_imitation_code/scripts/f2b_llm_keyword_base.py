@@ -2,7 +2,7 @@ import os
 import re
 import shutil
 
-from core._core_gui_runner import safe_run_app, inject_env, ThreadSafeBaseGUI
+from core._core_cli_runner import safe_run_app, inject_env, HeadlessBaseTask
 inject_env()
 
 from core._core_config import BASE_DIR, PROJECT_ROOT, REFERENCE_DIR, STYLE_DIR, PROJ_DIR
@@ -10,49 +10,12 @@ from core._core_utils import smart_read_text, atomic_write
 from core._core_llm import call_deepseek_api
 from core._core_rag import RAGRetriever
 
-class KeywordBaseApp(ThreadSafeBaseGUI):
-    def __init__(self, root):
-        super().__init__(root, title="f2b: 大模型词汇清洗与细节分类提取 (RAG 向量检索版)", geometry="600x450")
-
-    def setup_custom_widgets(self):
-        import tkinter as tk
-        from tkinter import ttk, filedialog
-        padding = {'padx': 10, 'pady': 8}
-
-        frame_original = ttk.LabelFrame(self.root, text="1. 选择参考小说原文 (.txt)")
-        frame_original.pack(fill="x", **padding)
-        self.original_var = tk.StringVar()
-        ttk.Entry(frame_original, textvariable=self.original_var, state="readonly", width=55).grid(row=0, column=0, padx=5, pady=10)
-        ttk.Button(frame_original, text="浏览...", command=self.select_original).grid(row=0, column=1, padx=5, pady=10)
-
-        frame_model = ttk.LabelFrame(self.root, text="2. 选择处理模型")
-        frame_model.pack(fill="x", **padding)
-        self.model_var = tk.StringVar(value="deepseek-chat")
-        ttk.Radiobutton(frame_model, text="DeepSeek V3 (标准)", variable=self.model_var, value="deepseek-chat").pack(side=tk.LEFT, padx=10, pady=5)
-        ttk.Radiobutton(frame_model, text="DeepSeek R1 (推理)", variable=self.model_var, value="deepseek-reasoner").pack(side=tk.LEFT, padx=10, pady=5)
-
-        self.btn_process = ttk.Button(self.root, text="执行全量向量化与词汇清洗提取", command=lambda: self.start_process_thread(self.btn_process))
-        self.btn_process.pack(pady=10)
-        self.log("系统就绪。将自动读取全局 RAG 向量库 (由 f0 构建)，结合 f2a 提取的高频词进行精准片段检索。")
-
-    def select_original(self):
-        import tkinter as tk
-        from tkinter import filedialog
-        init_dir = REFERENCE_DIR if os.path.exists(REFERENCE_DIR) else BASE_DIR
-        path = filedialog.askopenfilename(initialdir=init_dir, title="选择原文", filetypes=[("Text Files", "*.txt")])
-        if path: self.original_var.set(path)
+class KeywordBaseApp(HeadlessBaseTask):
+    def __init__(self):
+        super().__init__()
 
     def execute_logic(self):
-        import tkinter.messagebox as messagebox
-        original_path = self.original_var.get()
-        model = self.model_var.get()
-        if not original_path:
-            self.log("[ERROR] 请先选择小说原文文件！")
-            return
-            
-        result = self.execute_extraction(original_path, model, self.log, project_name=None)
-        if result:
-            messagebox.showinfo("完成", "词汇清洗与分类完毕，正面词库已生成。")
+        pass # 此方法已完全交由 Web API 层通过 run_headless 静默执行
 
     @staticmethod
     def execute_extraction(original_path, model, log_func, project_name=None):

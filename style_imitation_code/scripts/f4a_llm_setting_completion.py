@@ -2,7 +2,7 @@ import os
 import json
 import shutil
 
-from core._core_gui_runner import safe_run_app, inject_env, ThreadSafeBaseGUI
+from core._core_cli_runner import safe_run_app, inject_env, HeadlessBaseTask
 inject_env()
 
 from core._core_config import BASE_DIR, PROJECT_ROOT, REFERENCE_DIR, STYLE_DIR, PROJ_DIR
@@ -10,133 +10,12 @@ from core._core_llm import call_deepseek_api
 from core._core_utils import atomic_write
 from core._core_rag import RAGRetriever
 
-class SettingCompletionApp(ThreadSafeBaseGUI):
-    def __init__(self, root):
-        super().__init__(root, title="f4a: 设定补全 (世界观/角色卡)", geometry="750x650")
-
-    def setup_custom_widgets(self):
-        import tkinter as tk
-        from tkinter import ttk, filedialog
-        padding = {'padx': 10, 'pady': 8}
-
-        top_frame = ttk.Frame(self.root)
-        top_frame.pack(fill="x", padx=10, pady=5)
-        
-        self.original_var = tk.StringVar()
-        ttk.Label(top_frame, text="参考原文(.txt):").grid(row=0, column=0, sticky="w")
-        ttk.Entry(top_frame, textvariable=self.original_var, state="readonly", width=55).grid(row=0, column=1, padx=5)
-        ttk.Button(top_frame, text="浏览...", command=self.select_original).grid(row=0, column=2, padx=5)
-        
-        self.model_var = tk.StringVar(value="deepseek-chat")
-        ttk.Label(top_frame, text="处理模型:").grid(row=1, column=0, sticky="w", pady=5)
-        ttk.Radiobutton(top_frame, text="DeepSeek V3", variable=self.model_var, value="deepseek-chat").grid(row=1, column=1, sticky="w")
-
-        self.notebook = ttk.Notebook(self.root)
-        self.notebook.pack(fill="both", expand=True, padx=10, pady=5)
-        
-        self.build_worldview_tab()
-        self.build_character_tab()
-        self.log("系统就绪。请选择补全模式并填写必要信息。")
-
-    def build_worldview_tab(self):
-        import tkinter as tk
-        from tkinter import ttk
-        frame = ttk.Frame(self.notebook)
-        self.notebook.add(frame, text="世界观补全")
-        
-        self.wv_vars = {}
-        fields = [
-            ("世界观 (必填)", "worldview"), ("力量体系 (必填)", "power_system"),
-            ("类型", "type"), ("女主数量", "heroines"),
-            ("核心爽点/金手指", "cheat"), ("出场角色及别名", "characters"),
-            ("种族/阵营", "factions"), ("历史/传说", "history"),
-            ("资源", "resources"), ("其他", "others")
-        ]
-        
-        for i, (label_text, key) in enumerate(fields):
-            ttk.Label(frame, text=label_text).grid(row=i, column=0, sticky="w", padx=10, pady=4)
-            var = tk.StringVar()
-            self.wv_vars[key] = var
-            ttk.Entry(frame, textvariable=var, width=60).grid(row=i, column=1, padx=5, pady=4)
-            
-        ttk.Button(frame, text="执行世界观补全", command=lambda: self.start_completion_thread("worldview")).grid(row=len(fields), column=1, sticky="e", pady=10)
-
-    def build_character_tab(self):
-        import tkinter as tk
-        from tkinter import ttk
-        frame = ttk.Frame(self.notebook)
-        self.notebook.add(frame, text="角色卡补全")
-        
-        self.char_vars = {}
-        ttk.Label(frame, text="目标角色名:").grid(row=0, column=0, sticky="w", padx=10, pady=2)
-        self.char_vars["name"] = tk.StringVar()
-        ttk.Entry(frame, textvariable=self.char_vars["name"], width=20).grid(row=0, column=1, sticky="w", pady=2)
-        
-        ttk.Label(frame, text="人物类型 (必填):").grid(row=1, column=0, sticky="w", padx=10, pady=2)
-        self.char_vars["char_type"] = tk.StringVar()
-        ttk.Combobox(frame, textvariable=self.char_vars["char_type"], values=["男主角", "女主角", "配角", "反派"], width=17).grid(row=1, column=1, sticky="w", pady=2)
-        
-        ttk.Label(frame, text="人物塑造 (必填):").grid(row=2, column=0, sticky="w", padx=10, pady=2)
-        self.char_vars["char_shape"] = tk.StringVar()
-        ttk.Combobox(frame, textvariable=self.char_vars["char_shape"], values=["圆形人物", "扁平人物"], width=17).grid(row=2, column=1, sticky="w", pady=2)
-
-        ttk.Label(frame, text="--- 二、相关信息 (至少填2项) ---", foreground="blue").grid(row=3, column=0, columnspan=2, sticky="w", padx=10, pady=5)
-        sec2_fields = [("身份", "identity"), ("性格", "personality"), ("外貌等", "appearance"), ("能力特点/境界", "ability"), ("年龄与经历", "experience")]
-        for i, (label, key) in enumerate(sec2_fields):
-            ttk.Label(frame, text=label).grid(row=4+i, column=0, sticky="w", padx=20, pady=2)
-            self.char_vars[key] = tk.StringVar()
-            ttk.Entry(frame, textvariable=self.char_vars[key], width=50).grid(row=4+i, column=1, sticky="w", pady=2)
-            
-        ttk.Label(frame, text="--- 四、对主要角色态度 (至少填1项) ---", foreground="blue").grid(row=9, column=0, columnspan=2, sticky="w", padx=10, pady=5)
-        ttk.Label(frame, text="态度输入:").grid(row=10, column=0, sticky="w", padx=20, pady=2)
-        self.char_vars["attitude"] = tk.StringVar()
-        ttk.Entry(frame, textvariable=self.char_vars["attitude"], width=50).grid(row=10, column=1, sticky="w", pady=2)
-
-        ttk.Button(frame, text="执行角色卡补全", command=lambda: self.start_completion_thread("character")).grid(row=11, column=1, sticky="e", pady=10)
-
-    def select_original(self):
-        import tkinter as tk
-        from tkinter import filedialog
-        init_dir = REFERENCE_DIR if os.path.exists(REFERENCE_DIR) else BASE_DIR
-        path = filedialog.askopenfilename(initialdir=init_dir, filetypes=[("Text Files", "*.txt")])
-        if path: self.original_var.set(path)
-
-    def start_completion_thread(self, mode):
-        # 这种多 tab 结构需要自定义调度逻辑，或者动态绑定 execute_logic
-        self.current_mode = mode
-        self.start_process_thread(None) # 临时传入 None，基类会处理 is_running
+class SettingCompletionApp(HeadlessBaseTask):
+    def __init__(self):
+        super().__init__()
 
     def execute_logic(self):
-        import tkinter.messagebox as messagebox
-        mode = getattr(self, "current_mode", "worldview")
-        data_to_pass = {}
-        if mode == "worldview":
-            if not self.wv_vars["worldview"].get().strip():
-                self.log("[ERROR] 【世界观】为必填项！")
-                return
-            if not self.wv_vars["power_system"].get().strip():
-                self.log("[ERROR] 【力量体系】不能为空！")
-                return
-            data_to_pass = {k: v.get().strip() for k, v in self.wv_vars.items()}
-            
-        elif mode == "character":
-            if not self.char_vars["name"].get().strip() or not self.char_vars["char_type"].get().strip() or not self.char_vars["char_shape"].get().strip():
-                self.log("[ERROR] 名字、人物类型、人物塑造 为必填项！")
-                return
-                
-            sec2_filled = sum(1 for k in ["identity", "personality", "appearance", "ability", "experience"] if self.char_vars[k].get().strip())
-            if sec2_filled < 2:
-                self.log("[ERROR] 【二、相关信息】至少需要填写 2 项！")
-                return
-                
-            if not self.char_vars["attitude"].get().strip():
-                self.log("[ERROR] 【四、对主要角色的态度】至少需要填写 1 项！")
-                return
-            data_to_pass = {k: v.get().strip() for k, v in self.char_vars.items()}
-
-        success = self.execute_completion(self.original_var.get(), mode, data_to_pass, self.model_var.get(), self.log)
-        if success:
-            messagebox.showinfo("完成", f"{mode} 设定补全任务已完成。")
+        pass # 此方法已完全交由 Web API 层通过 run_headless 静默执行
 
     @staticmethod
     def execute_completion(original_path, mode, json_data, model, log_func, project_name=None):

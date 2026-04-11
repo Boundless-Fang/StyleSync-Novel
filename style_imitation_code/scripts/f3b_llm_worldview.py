@@ -2,7 +2,7 @@ import os
 import re
 import shutil
 
-from core._core_gui_runner import safe_run_app, inject_env, ThreadSafeBaseGUI
+from core._core_cli_runner import safe_run_app, inject_env, HeadlessBaseTask
 inject_env()
 
 from core._core_config import BASE_DIR, PROJECT_ROOT, REFERENCE_DIR, STYLE_DIR, PROJ_DIR
@@ -10,49 +10,12 @@ from core._core_utils import smart_read_text, atomic_write
 from core._core_llm import call_deepseek_api
 from core._core_rag import RAGRetriever
 
-class WorldviewApp(ThreadSafeBaseGUI):
-    def __init__(self, root):
-        super().__init__(root, title="f3b: 世界观整理与补全 (RAG 向量检索版)", geometry="650x450")
-
-    def setup_custom_widgets(self):
-        import tkinter as tk
-        from tkinter import ttk, filedialog
-        padding = {'padx': 10, 'pady': 8}
-
-        frame_original = ttk.LabelFrame(self.root, text="1. 选择小说原文 (.txt)")
-        frame_original.pack(fill="x", **padding)
-        self.original_var = tk.StringVar()
-        ttk.Entry(frame_original, textvariable=self.original_var, state="readonly", width=60).grid(row=0, column=0, padx=5, pady=10)
-        ttk.Button(frame_original, text="浏览...", command=self.select_original).grid(row=0, column=1, padx=5, pady=10)
-
-        frame_model = ttk.LabelFrame(self.root, text="2. 选择处理模型")
-        frame_model.pack(fill="x", **padding)
-        self.model_var = tk.StringVar(value="deepseek-chat")
-        ttk.Radiobutton(frame_model, text="DeepSeek V3 (标准)", variable=self.model_var, value="deepseek-chat").pack(side=tk.LEFT, padx=10, pady=5)
-        ttk.Radiobutton(frame_model, text="DeepSeek R1 (推理)", variable=self.model_var, value="deepseek-reasoner").pack(side=tk.LEFT, padx=10, pady=5)
-        
-        self.btn_process = ttk.Button(self.root, text="全文定向检索与构建世界观", command=lambda: self.start_process_thread(self.btn_process))
-        self.btn_process.pack(pady=10)
-        self.log("系统就绪。请确保已执行 f3a 生成专属词库，本环节将强依赖该词库进行 RAG 检索。")
-
-    def select_original(self):
-        import tkinter as tk
-        from tkinter import filedialog
-        init_dir = REFERENCE_DIR if os.path.exists(REFERENCE_DIR) else BASE_DIR
-        path = filedialog.askopenfilename(initialdir=init_dir, title="选择原文", filetypes=[("Text Files", "*.txt")])
-        if path: self.original_var.set(path)
+class WorldviewApp(HeadlessBaseTask):
+    def __init__(self):
+        super().__init__()
 
     def execute_logic(self):
-        import tkinter.messagebox as messagebox
-        original_path = self.original_var.get()
-        model = self.model_var.get()
-        if not original_path:
-            self.log("[ERROR] 请先选择原文文件！")
-            return
-            
-        result = self.execute_extraction(original_path, model, self.log, project_name=None)
-        if result:
-            messagebox.showinfo("完成", "世界观设定构建完毕，文件已落盘。")
+        pass # 此方法已完全交由 Web API 层通过 run_headless 静默执行
 
     @staticmethod
     def execute_extraction(original_path, model, log_func, project_name=None):

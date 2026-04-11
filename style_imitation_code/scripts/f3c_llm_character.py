@@ -3,7 +3,7 @@ import re
 import shutil
 import math
 
-from core._core_gui_runner import safe_run_app, inject_env, ThreadSafeBaseGUI
+from core._core_cli_runner import safe_run_app, inject_env, HeadlessBaseTask
 inject_env()
 
 from core._core_config import BASE_DIR, PROJECT_ROOT, REFERENCE_DIR, STYLE_DIR, PROJ_DIR
@@ -11,141 +11,12 @@ from core._core_utils import smart_read_text, atomic_write
 from core._core_llm import call_deepseek_api
 from core._core_rag import RAGRetriever
 
-class CharacterProfileApp(ThreadSafeBaseGUI):
-    def __init__(self, root):
-        super().__init__(root, title="f3c: 角色信息卡提取 (对数动态限量 + 批量处理版)", geometry="680x580")
-
-    def setup_custom_widgets(self):
-        import tkinter as tk
-        from tkinter import ttk, filedialog
-        padding = {'padx': 10, 'pady': 8}
-
-        # --- 区域 1：原文选择 ---
-        frame_original = ttk.LabelFrame(self.root, text="1. 选择小说原文 (.txt)")
-        frame_original.pack(fill="x", **padding)
-        self.original_var = tk.StringVar()
-        ttk.Entry(frame_original, textvariable=self.original_var, state="readonly", width=60).grid(row=0, column=0, padx=5, pady=10)
-        ttk.Button(frame_original, text="浏览...", command=self.select_original).grid(row=0, column=1, padx=5, pady=10)
-
-        # --- 区域 2：批量角色解析与输入 ---
-        frame_char = ttk.LabelFrame(self.root, text="2. 目标角色名单 (支持自动解析与手动补充)")
-        frame_char.pack(fill="x", **padding)
-        
-        btn_frame = ttk.Frame(frame_char)
-        btn_frame.pack(fill="x", padx=5, pady=2)
-        ttk.Button(btn_frame, text="从世界观(f3b)自动智能解析角色", command=self.auto_load_characters).pack(side=tk.LEFT)
-        ttk.Label(btn_frame, text="* 自动依据对数模型计算提取上限，其余可手动输入", foreground="gray").pack(side=tk.LEFT, padx=10)
-
-        self.char_text = tk.Text(frame_char, height=6, width=80)
-        self.char_text.pack(padx=5, pady=5)
-        self.char_text.insert(tk.END, "请点击上方按钮自动解析，或在此处手动输入角色名（每行一个）。\n格式例：\n林动\n林动(武祖、林动哥)")
-
-        # --- 区域 3：模型选择 ---
-        frame_model = ttk.LabelFrame(self.root, text="3. 选择处理模型")
-        frame_model.pack(fill="x", **padding)
-        self.model_var = tk.StringVar(value="deepseek-chat")
-        ttk.Radiobutton(frame_model, text="DeepSeek V3 (标准)", variable=self.model_var, value="deepseek-chat").pack(side=tk.LEFT, padx=10, pady=5)
-        ttk.Radiobutton(frame_model, text="DeepSeek R1 (推理)", variable=self.model_var, value="deepseek-reasoner").pack(side=tk.LEFT, padx=10, pady=5)
-        
-        # --- 执行按钮 ---
-        self.btn_process = ttk.Button(self.root, text="执行全量向量检索与批量角色卡提取", command=lambda: self.start_process_thread(self.btn_process))
-        self.btn_process.pack(pady=5)
-        self.log("系统就绪。支持基于字数的动态对数限制机制。")
-
-    def select_original(self):
-        import tkinter as tk
-        from tkinter import filedialog
-        init_dir = REFERENCE_DIR if os.path.exists(REFERENCE_DIR) else BASE_DIR
-        path = filedialog.askopenfilename(initialdir=init_dir, title="选择原文", filetypes=[("Text Files", "*.txt")])
-        if path: self.original_var.set(path)
-
-    def auto_load_characters(self):
-        import tkinter as tk
-        original_path = self.original_var.get()
-        if not original_path or not os.path.exists(original_path):
-            import tkinter.messagebox as messagebox
-            messagebox.showwarning("提示", "请先选择有效的参考原文！")
-            return
-
-        novel_name = os.path.splitext(os.path.basename(original_path))[0]
-        settings_path = os.path.join(STYLE_DIR, f"{novel_name}_style_imitation", "world_settings.md")
-
-        if not os.path.exists(settings_path):
-            import tkinter.messagebox as messagebox
-            messagebox.showwarning("提示", "未找到世界观设定(world_settings.md)，请确保已执行 f3b 环节！")
-            return
-
-        self.log("正在计算文本体量并解析 f3b 角色列表...")
-        
-        # 1. 动态对数计算容量上限 N
-        try:
-            text_content = smart_read_text(original_path)
-            text_len = len(text_content)
-            # N = 5 * log10(L / 10000)，保底 3 个
-            if text_len < 10000:
-                limit = 3
-            else:
-                limit = max(3, int(5 * math.log10(text_len / 10000.0)))
-        except Exception as e:
-            self.log(f"[WARN] 原文长度计算失败，默认限制提取 5 个角色。({str(e)})")
-            text_len = "未知"
-            limit = 5
-
-        # 2. 从设定中正则提取角色
-        try:
-            settings_text = smart_read_text(settings_path)
-            match = re.search(r'出场角色.*?[：:]\s*(.*)', settings_text)
-            if not match:
-                self.log("[ERROR] 无法在 world_settings.md 中定位到 [出场角色] 字段，请检查设定文件格式。")
-                return
-
-            chars_str = match.group(1).strip()
-            raw_chars = re.findall(r'[^、，,（(]+(?:\([^)]+\)|（[^）]+）)?', chars_str)
-            raw_chars = [c.strip() for c in raw_chars if c.strip() and len(c.strip()) > 1]
-
-            if not raw_chars:
-                self.log("[ERROR] 提取到的角色列表为空。")
-                return
-
-            # 3. 执行截断并应用到界面
-            selected_chars = raw_chars[:limit]
-            self.log(f"[INFO] 原文体量: ~{text_len} 字。基于对数模型，建议提取上限为 {limit} 个。")
-            self.log(f"[INFO] 成功从原著世界观中提取出 {len(selected_chars)} 个主要角色！")
-
-            self.char_text.delete("1.0", tk.END)
-            self.char_text.insert(tk.END, "\n".join(selected_chars))
-            
-        except Exception as e:
-            self.log(f"[ERROR] 自动解析发生错误: {str(e)}")
+class CharacterProfileApp(HeadlessBaseTask):
+    def __init__(self):
+        super().__init__()
 
     def execute_logic(self):
-        import tkinter.messagebox as messagebox
-        import tkinter as tk
-        original_path = self.original_var.get()
-        model = self.model_var.get()
-        
-        chars_input = self.char_text.get("1.0", tk.END).strip()
-        if not chars_input or "请点击上方按钮自动解析" in chars_input:
-            self.log("[ERROR] 角色名单不能为空，请自动提取或手动输入！")
-            return
-            
-        # 将文本框内容切分为列表
-        chars_list = chars_input.split('\n')
-        chars = [c.strip() for c in chars_list if c.strip()]
-        
-        success_count = 0
-        total_count = len(chars)
-
-        self.log(f"\n[INFO] 开始执行批量角色卡提取任务，共计 {total_count} 个目标角色。")
-        
-        for idx, char_name in enumerate(chars, 1):
-            self.log(f"\n--- [任务 {idx}/{total_count}] 正在追踪提取: {char_name} ---")
-            result = self.execute_extraction(original_path, char_name, model, self.log, project_name=None)
-            if result:
-                success_count += 1
-
-        self.log(f"\n🎉 批量任务结束！成功提取 {success_count}/{total_count} 个角色。")
-        messagebox.showinfo("完成", f"批量角色卡提取完毕！成功 {success_count}/{total_count} 个。")
+        pass # 此方法已完全交由 Web API 层通过 run_headless 静默执行
 
     @staticmethod
     def parse_character_names(char_input):

@@ -7,6 +7,8 @@ import shutil
 import glob
 import json
 import asyncio
+import time      
+import random    
 
 # 动态获取系统临时目录构建独立沙箱
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -14,13 +16,21 @@ SANDBOX_DIR = os.path.join(tempfile.gettempdir(), "style_sync_sandbox")
 os.makedirs(SANDBOX_DIR, exist_ok=True)
 
 def mask_sensitive_info(error_msg: str) -> str:
-    """异常拦截器：脱敏报错堆栈中的服务器真实绝对路径。"""
+    """异常拦截器：脱敏报错堆栈中的服务器真实绝对路径与高危鉴权凭证。"""
     msg = str(error_msg)
+    
+    # 1. 物理环境脱敏：拦截绝对工作区与沙箱路径
     msg = msg.replace(PROJECT_ROOT, "[SERVER_WORKSPACE]")
     msg = msg.replace(SANDBOX_DIR, "[SECURE_SANDBOX]")
-    # 泛化兜底：屏蔽常见的盘符绝对路径暴露
+    
+    # 2. 泛化兜底：屏蔽常见的盘符绝对路径暴露
     msg = re.sub(r'[A-Za-z]:\\[^\s"\'<>]+', '[LOCAL_PATH]', msg)
     msg = re.sub(r'/(?:tmp|usr|opt|var|home|etc)/[^\s"\'<>]+', '[LOCAL_PATH]', msg)
+    
+    # 3. 鉴权资产脱敏：基于高危特征库的正则深度清洗
+    msg = re.sub(r'sk-[a-zA-Z0-9]{20,}', '[REDACTED_API_KEY]', msg)
+    msg = re.sub(r'Bearer\s+[a-zA-Z0-9\-\.\_]{20,}', 'Bearer [REDACTED_TOKEN]', msg)
+    
     return msg
 
 def validate_safe_param(param: str) -> str:
@@ -41,7 +51,6 @@ def create_sandbox_ticket(source_file_path: str) -> str:
         return ""
     
     ticket_id = f"TKT-{uuid.uuid4().hex}"
-    # 必须剥离原始 basename，防止恶意文件名被传入 CLI
     ext = os.path.splitext(source_file_path)[1] or ".txt"
     sandbox_path = os.path.join(SANDBOX_DIR, f"{ticket_id}{ext}")
     
@@ -54,7 +63,6 @@ def create_sandbox_ticket(source_file_path: str) -> str:
 
 def resolve_sandbox_ticket(ticket_id: str) -> str:
     """逆向解析票据，仅允许检索限定在沙箱内部的文件。"""
-    # 剔除可能附带的扩展名，仅提取核心票据ID
     ticket_base = os.path.splitext(os.path.basename(ticket_id))[0]
     
     if not ticket_base.startswith("TKT-") or not re.match(r'^TKT-[a-f0-9]{32}$', ticket_base):
@@ -87,9 +95,7 @@ def cleanup_sandbox_ticket(ticket_id: str):
             pass
 
 def smart_read_text(file_path, max_len=None):
-    """智能读取中文小说，防止崩溃。已整合底层无感沙箱解析机制。"""
-    
-    # 识别到票据前缀，自动劫持并重定向至沙箱路径
+    """智能读取中文小说，防止崩溃。"""
     basename = os.path.basename(file_path)
     if basename.startswith("TKT-"):
         try:
@@ -127,12 +133,7 @@ def smart_read_text(file_path, max_len=None):
         raise RuntimeError(error_msg)
 
 def smart_yield_text(file_path: str, chunk_size: int = 8192, high_water_mark: int = 1048576):
-    """
-    带高水位线保护的自然段动态缓冲流式读取器。
-    
-    :param chunk_size: 每次物理 I/O 读取的字节数
-    :param high_water_mark: 内存缓冲区高水位警戒线（默认 1MB），防止无换行长文本导致 OOM
-    """
+    """带高水位线保护的自然段动态缓冲流式读取器。"""
     basename = os.path.basename(file_path)
     if basename.startswith("TKT-"):
         try:
@@ -143,7 +144,6 @@ def smart_yield_text(file_path: str, chunk_size: int = 8192, high_water_mark: in
     encodings_to_try = ['utf-8', 'gb18030', 'utf-16']
     target_encoding = None
 
-    # 嗅探有效编码
     for enc in encodings_to_try:
         try:
             with open(file_path, 'r', encoding=enc) as f:
@@ -168,14 +168,12 @@ def smart_yield_text(file_path: str, chunk_size: int = 8192, high_water_mark: in
 
                 buffer += chunk
                 
-                # 内存高水位线强制截断
                 if len(buffer) > high_water_mark:
                     print(f"[WARN] 触发内存高水位告警 ({high_water_mark} bytes)，执行强制截断以防 OOM。")
                     yield buffer
                     buffer = ""
                     continue
 
-                # 动态寻找最后一次换行符的物理边界
                 last_newline_idx = buffer.rfind('\n')
                 if last_newline_idx != -1:
                     yield buffer[:last_newline_idx + 1]
@@ -186,121 +184,121 @@ def smart_yield_text(file_path: str, chunk_size: int = 8192, high_water_mark: in
         print(f"[ERROR] {error_msg}")
         raise RuntimeError(error_msg)
 
-def resolve_sandbox_path(base_dir: str, user_input_path: str, allowed_extensions=('.txt', '.md')) -> str: 
-    """基础目录守卫：将外部输入安全的限制在指定根目录内。""" 
-    if not user_input_path: 
-        raise ValueError("输入路径不能为空") 
+def resolve_sandbox_path(base_dir: str, user_input_path: str, allowed_extensions=('.txt', '.md')) -> str:
+    """基础目录守卫：将外部输入安全的限制在指定根目录内。"""
+    if not user_input_path:
+        raise ValueError("输入路径不能为空")
 
-    safe_base = os.path.normcase(os.path.realpath(os.path.abspath(base_dir))) 
-    raw_target = os.path.join(safe_base, user_input_path) 
-    safe_target = os.path.normcase(os.path.realpath(os.path.abspath(raw_target))) 
+    safe_base = os.path.normcase(os.path.realpath(os.path.abspath(base_dir)))
+    raw_target = os.path.join(safe_base, user_input_path)
+    safe_target = os.path.normcase(os.path.realpath(os.path.abspath(raw_target)))
     
-    if os.path.commonpath([safe_base, safe_target]) != safe_base: 
-        raise PermissionError("【系统拦截】：检测到越权路径访问尝试！") 
+    if os.path.commonpath([safe_base, safe_target]) != safe_base:
+        raise PermissionError("【系统拦截】：检测到越权路径访问尝试！")
         
-    if os.path.isdir(safe_target): 
-        raise IsADirectoryError("【系统拦截】：目标路径为文件夹，拒绝读取！") 
+    if os.path.isdir(safe_target):
+        raise IsADirectoryError("【系统拦截】：目标路径为文件夹，拒绝读取！")
         
-    if allowed_extensions and not safe_target.endswith(allowed_extensions): 
-        raise ValueError(f"【系统拦截】：不支持的文件格式，仅允许 {allowed_extensions}") 
+    if allowed_extensions and not safe_target.endswith(allowed_extensions):
+        raise ValueError(f"【系统拦截】：不支持的文件格式，仅允许 {allowed_extensions}")
         
     return safe_target
 
-def atomic_write(target_path: str, data, data_type: str = 'text'): 
-    """ 
-    全局通用原子写入器 (Atomic Writer) 
-    防止进程被强杀、超时或断电导致的目标文件损坏与残缺。 
-    
-    :param target_path: 最终需要保存的绝对路径 
-    :param data: 需要写入的数据 (字符串 / 字典或列表 / FAISS Index 对象) 
-    :param data_type: 数据格式，支持 'text', 'json', 'faiss' 
-    """ 
-    dirname = os.path.dirname(target_path) 
-    if dirname: 
-        os.makedirs(dirname, exist_ok=True) 
+def atomic_write(target_path: str, data, data_type: str = 'text'):
+    """
+    全局通用原子写入器 (Atomic Writer) - 重构版
+    彻底修复 Windows 独占锁导致的不可逆数据丢失缺陷。
+    """
+    dirname = os.path.dirname(target_path)
+    if dirname:
+        os.makedirs(dirname, exist_ok=True)
         
-    # 1. 临时态隔离：生成带 UUID 的独立临时文件 
-    temp_path = f"{target_path}.{uuid.uuid4().hex}.tmp" 
+    # 1. 临时态隔离：生成带 UUID 的独立临时文件
+    temp_path = f"{target_path}.{uuid.uuid4().hex}.tmp"
     
-    try: 
-        # 2. 针对不同类型执行写入 
-        if data_type == 'json': 
-            with open(temp_path, 'w', encoding='utf-8') as f: 
-                json.dump(data, f, ensure_ascii=False, indent=2) 
-        elif data_type == 'faiss': 
-            import faiss 
-            faiss.write_index(data, temp_path) 
-        else:  # 默认为纯文本 'text' 
-            with open(temp_path, 'w', encoding='utf-8') as f: 
-                f.write(str(data)) 
+    try:
+        # 2. 针对不同类型执行写入
+        if data_type == 'json':
+            with open(temp_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        elif data_type == 'faiss':
+            import faiss
+            faiss.write_index(data, temp_path)
+        else:  # 'text'
+            with open(temp_path, 'w', encoding='utf-8') as f:
+                f.write(str(data))
                 
-        # 3. 操作系统级原子重命名覆盖 (瞬间替换，绝对安全) 
-        os.replace(temp_path, target_path) 
-        return True 
+        # 3. 延长的防惊群退避机制
+        max_retries = 10     # 次数翻倍
+        base_delay = 0.2     # 基础延迟翻4倍
+        max_delay = 3.0      # 单次休眠封顶 3 秒
         
-    except Exception as e: 
-        # 4. 事务回滚：发生异常时主动清理产生的物理碎片 
-        if os.path.exists(temp_path): 
-            try: 
-                os.remove(temp_path) 
-            except OSError: 
-                pass 
-        raise RuntimeError(f"原子写入事务失败，已回滚: {str(e)}")
+        for attempt in range(max_retries):
+            try:
+                os.replace(temp_path, target_path)
+                return True
+            except PermissionError as e:
+                if attempt < max_retries - 1:
+                    # 带封顶的温和指数退避 + 随机抖动
+                    sleep_time = min(max_delay, base_delay * (1.5 ** attempt)) + random.uniform(0, 0.1)
+                    time.sleep(sleep_time)
+                    continue
+                else:
+                    # 4. 核心避险：超越重试上限后，保留孤儿临时文件，严禁删除数据！
+                    backup_path = f"{target_path}.backup-{int(time.time())}.txt"
+                    try:
+                        os.replace(temp_path, backup_path)
+                        raise RuntimeError(f"目标文件被其它软件死死锁定，无法覆写。为防数据丢失，已为您生成紧急备份: {backup_path}")
+                    except OSError:
+                        raise RuntimeError(f"文件锁定且重命名失败。AI 辛苦生成的数据已保留在临时文件中: {temp_path}")
+                    
+    except Exception as e:
+        # 5. 事务回滚：只有在非锁死错误（如磁盘满、JSON序列化错误）时，才清理产生的物理碎片
+        if not isinstance(e, RuntimeError) or ("紧急备份" not in str(e) and "临时文件保留" not in str(e)):
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+        raise RuntimeError(f"原子写入事务失败，详情: {str(e)}")
 
-class AsyncFileLockManager: 
-    """全局单例：文件级细粒度异步锁状态机""" 
-    _locks = {} 
-    _ref_counts = {} 
-    _dict_lock = asyncio.Lock() 
+class AsyncFileLockManager:
+    """全局单例：文件级细粒度异步锁状态机（常驻内存池）"""
+    _locks = {}
+    _dict_lock = asyncio.Lock()
 
-class async_file_lock: 
-    """ 
-    生产级文件读写异步互斥锁 (Context Manager)。 
-    利用引用计数实现内存确定性释放，避免高并发下字典无限膨胀。 
-    """ 
-    def __init__(self, file_path: str): 
-        if not file_path: 
-            raise ValueError("系统拦截：文件路径不能为空" ) 
-        # 绝对路径标准化，防止相同文件的不同路径表达绕过锁机制 
-        self.norm_path = os.path.normcase(os.path.realpath(os.path.abspath(file_path))) 
+class async_file_lock:
+    """生产级文件读写异步互斥锁"""
+    def __init__(self, file_path: str):
+        if not file_path:
+            raise ValueError("系统拦截：文件路径不能为空")
+        self.norm_path = os.path.normcase(os.path.realpath(os.path.abspath(file_path)))
 
-    async def __aenter__(self): 
-        async with AsyncFileLockManager._dict_lock: 
-            if self.norm_path not in AsyncFileLockManager._locks: 
-                AsyncFileLockManager._locks[self.norm_path] = asyncio.Lock() 
-                AsyncFileLockManager._ref_counts[self.norm_path] = 0 
-            AsyncFileLockManager._ref_counts[self.norm_path] += 1 
-            self.lock = AsyncFileLockManager._locks[self.norm_path] 
+    async def __aenter__(self):
+        async with AsyncFileLockManager._dict_lock:
+            if self.norm_path not in AsyncFileLockManager._locks:
+                AsyncFileLockManager._locks[self.norm_path] = asyncio.Lock()
+            self.lock = AsyncFileLockManager._locks[self.norm_path]
         
-        # 挂起当前协程，等待获取该文件的独占操作权 
-        await self.lock.acquire() 
-        return self 
+        await self.lock.acquire()
+        return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb): 
-        self.lock.release() 
-        async with AsyncFileLockManager._dict_lock: 
-            AsyncFileLockManager._ref_counts[self.norm_path] -= 1 
-            # 引用计数归零时，主动销毁锁对象，释放内存 
-            if AsyncFileLockManager._ref_counts[self.norm_path] <= 0 : 
-                AsyncFileLockManager._locks.pop(self.norm_path, None ) 
-                AsyncFileLockManager._ref_counts.pop(self.norm_path, None ) 
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        self.lock.release()
 
-async def async_smart_read_text(file_path: str, max_len: int = None) -> str: 
-    """异步非阻塞安全读取：自带文件粒度并发锁与线程池卸载""" 
-    async with async_file_lock(file_path): 
-        return await asyncio.to_thread(smart_read_text, file_path, max_len) 
+async def async_smart_read_text(file_path: str, max_len: int = None) -> str:
+    async with async_file_lock(file_path):
+        return await asyncio.to_thread(smart_read_text, file_path, max_len)
 
-async def async_atomic_write(target_path: str, data, data_type: str = 'text') -> bool: 
-    """异步非阻塞原子写入：自带文件粒度并发锁与线程池卸载""" 
-    async with async_file_lock(target_path): 
-        return await asyncio.to_thread(atomic_write, target_path, data, data_type) 
+async def async_atomic_write(target_path: str, data, data_type: str = 'text') -> bool:
+    async with async_file_lock(target_path):
+        return await asyncio.to_thread(atomic_write, target_path, data, data_type)
 
-async def async_append_text(target_path: str, content: str) -> bool: 
-    """异步非阻塞追加写入：自带文件粒度并发锁与线程池卸载""" 
-    def _append(): 
-        with open(target_path, "a", encoding="utf-8") as f: 
-            f.write(content) 
-        return True 
+async def async_append_text(target_path: str, content: str) -> bool:
+    def _append():
+        with open(target_path, "a", encoding="utf-8") as f:
+            f.write(content)
+        return True
         
-    async with async_file_lock(target_path): 
+    async with async_file_lock(target_path):
         return await asyncio.to_thread(_append)
