@@ -314,6 +314,7 @@
                     
                     <label class="text-xs text-gray-500 block mb-1">执行脚本类型</label>
                     <select v-model="workflowProjectScript" class="w-full text-sm border border-gray-300 rounded p-2 mb-3 bg-gray-50 outline-none">
+                        <option value="f4c">f4c - 构建工程前文记忆库</option>
                         <option value="f4a">f4a - 设定补全 (世界观/角色)</option>
                         <option value="f5a">f5a - 章节大纲生成</option>
                         <option value="f5b">f5b - 小说正文生成</option>
@@ -466,11 +467,19 @@
                         <textarea v-model="workflowChapterBrief" placeholder="输入本章发生的核心事件..." class="w-full text-sm border border-gray-300 rounded p-2 h-20 outline-none focus:ring-1 focus:ring-blue-500"></textarea>
                     </div>
 
-                    <div v-if="['f5a', 'f5b'].includes(workflowProjectScript)" class="mb-3 flex items-center bg-blue-50 p-2 rounded border border-blue-100">
-                        <label class="flex items-center gap-2 text-xs font-bold text-blue-700 cursor-pointer">
-                            <input type="checkbox" v-model="globalAutoValidate" class="accent-blue-600 w-4 h-4 cursor-pointer">
-                            开启全局自动校验(任务完成后自动执行f7宽松校验)
-                        </label>
+                    <div v-if="['f5a', 'f5b'].includes(workflowProjectScript)" class="mb-3 space-y-2">
+                        <div class="flex items-center bg-purple-50 p-2 rounded border border-purple-100">
+                            <label class="flex items-center gap-2 text-xs font-bold text-purple-700 cursor-pointer">
+                                <input type="checkbox" v-model="globalAutoMemory" class="accent-purple-600 w-4 h-4 cursor-pointer">
+                                开启自动记忆构建 (生成大纲/正文前，自动执行 f4c 提取前文)
+                            </label>
+                        </div>
+                        <div class="flex items-center bg-blue-50 p-2 rounded border border-blue-100">
+                            <label class="flex items-center gap-2 text-xs font-bold text-blue-700 cursor-pointer">
+                                <input type="checkbox" v-model="globalAutoValidate" class="accent-blue-600 w-4 h-4 cursor-pointer">
+                                开启全局自动校验 (任务完成后，自动执行 f7 宽松校验)
+                            </label>
+                        </div>
                     </div>
 
                     <button @click="runProjectScript" :disabled="!currentProject" class="w-full py-2 bg-green-50 hover:bg-green-100 text-green-700 disabled:opacity-50 text-sm font-medium rounded transition-colors border border-green-200">

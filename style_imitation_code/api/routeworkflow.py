@@ -279,6 +279,7 @@ async def run_script(
         chapter_name = validate_safe_param(chapter_name)
         model = validate_safe_param(model)
         
+        # 【修改点】：在映射字典中补充 f4c 节点，暴露底层调用入口
         script_map = { 
             "f0": "f0_local_vector_indexer.py", 
             "f1a": "f1a_local_text_stats.py", 
@@ -290,6 +291,7 @@ async def run_script(
             "f3c": "f3c_llm_character.py", 
             "f4a": "f4a_llm_setting_completion.py", 
             "f4b": "f4b_llm_plot_compression.py", 
+            "f4c": "f4c_local_project_rag.py", 
             "f5a": "f5a_llm_chapter_outline.py", 
             "f5b": "f5b_llm_novel_generation.py", 
             "f6":  "f6_llm_plot_deduction.py", 
@@ -312,6 +314,8 @@ async def run_script(
         target_name = os.path.basename(target_file) if target_file else "无目标文件" 
         if script_type == "f3c" and character: 
             target_name += f" ({character})" 
+        if script_type == "f4c" and project_name:
+            target_name = f"工程前文库 [{project_name}]"
             
         # ======================================================== 
         # 一键流水线 断点检索与跳过机制 
@@ -329,6 +333,7 @@ async def run_script(
             "f3b": os.path.join(style_dir, "world_settings.md"), 
             "f3c": os.path.join(style_dir, "character_profiles", f"{character}.md") if character else None, 
             "f4b": os.path.join(style_dir, "hierarchical_rag_db", "chunks.json") 
+            # 注意：f4c 属于动态前文库，不适用此处的静态缓存跳过机制，每次强制重构
         } 
          
         target_output = check_file_map.get(script_type) 
@@ -371,7 +376,7 @@ async def run_script(
          
         task_id = str(uuid.uuid4()) 
         TASKS[task_id] = { 
-            "name": f"{script_type} [{model}]: {target_name}", 
+            "name": f"{script_type} [{model if script_type != 'f4c' else 'local'}]: {target_name}", 
             "type": script_type, 
             "status": "pending", 
             "created_at": datetime.now().isoformat(), 

@@ -1,16 +1,18 @@
 import os
 import re
 import shutil
+import json
 from collections import Counter
 import jieba
 import jieba.posseg as pseg
 import faiss
 import numpy as np
+import gc
 
 from core._core_cli_runner import safe_run_app, inject_env, HeadlessBaseTask
 inject_env()
 
-from core._core_config import BASE_DIR, PROJECT_ROOT, REFERENCE_DIR, STYLE_DIR, PROJ_DIR
+from core._core_config import REFERENCE_DIR, STYLE_DIR, PROJ_DIR
 from core._core_utils import smart_read_text, atomic_write
 from core._core_rag import RAGRetriever
 
@@ -19,7 +21,7 @@ class LocalPlotCompressionApp(HeadlessBaseTask):
         super().__init__()
 
     def execute_logic(self):
-        pass # 此方法已完全交由 Web API 层通过 run_headless 静默执行
+        pass 
 
     @staticmethod
     def load_global_vocab(vocab_path):
@@ -33,15 +35,12 @@ class LocalPlotCompressionApp(HeadlessBaseTask):
     @staticmethod
     def extract_chunk_keywords(chunk_text, global_vocab, top_n=20):
         keyword_counts = Counter()
-        # 优先使用全局词库进行基础匹配 (O(N) 复杂度，极快)
         for word in global_vocab:
             count = chunk_text.count(word)
             if count > 0:
                 keyword_counts[word] += count
                 
-        # 当全局词库命中率极低时，才启用底层的词性标注兜底
         if len(keyword_counts) < top_n // 2:
-            # 【优化与防护】：将超长文本切分为 2000 字的微批次，防止 HMM 模型撑爆内存
             sub_chunk_size = 2000
             for i in range(0, len(chunk_text), sub_chunk_size):
                 sub_text = chunk_text[i:i+sub_chunk_size]
@@ -51,13 +50,13 @@ class LocalPlotCompressionApp(HeadlessBaseTask):
                         if len(w) >= 2 and flag in ['nr', 'ns', 'nt']:
                             keyword_counts[w] += 1
                 except Exception:
-                    # 风险防护：捕获罕见的不可见字符或乱码引发的 Jieba 崩溃，直接跳过当前坏块
                     pass
                     
         return [word for word, count in keyword_counts.most_common(top_n)]
 
     @staticmethod
     def split_by_chapters(text, max_len=10000):
+        """内存直通车全量切分"""
         pattern = r'\n(第[零一二三四五六七八九十百千万\d]+[章卷回节].*?)\n'
         segments = re.split(pattern, "\n" + text)
         
@@ -100,6 +99,92 @@ class LocalPlotCompressionApp(HeadlessBaseTask):
         return chunks
 
     @staticmethod
+    def stream_chapters_blocks(filepath, start_offset, block_size=10000):
+        """重载模式：流式章节拼接与缓冲弹出生成器"""
+        pattern = re.compile(r'^(第[零一二三四五六七八九十百千万\d]+[章卷回节].*?)$')
+        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+            f.seek(start_offset)
+            buffer = ""
+            titles = []
+            
+            while True:
+                line = f.readline()
+                if not line:
+                    if buffer.strip():
+                        yield {"titles": titles if titles else ["无名片段"], "text": buffer.strip()}, f.tell()
+                    break
+                
+                stripped_line = line.strip()
+                if pattern.match(stripped_line):
+                    titles.append(stripped_line)
+                    
+                buffer += line
+                
+                # 触达字节上限，切片弹出并记录精准游标
+                if len(buffer) >= block_size:
+                    yield {"titles": titles if titles else ["合并片段"], "text": buffer.strip()}, f.tell()
+                    buffer = ""
+                    titles = []
+
+    @staticmethod
+    def merge_compression_parts(rag_db_dir, outline_path, total_parts, log_func):
+        """重载模式：合并摘要索引库及 Markdown 大纲"""
+        log_func("[INFO] 正在将所有分卷压缩索引与大纲碎片合并...")
+        all_mapping = []
+        main_index = None
+        outline_content = ["# 核心事件与实体分布大纲 (重载流式合成版)\n"]
+
+        for p in range(1, total_parts + 1):
+            # 处理索引与映射表
+            idx_path = os.path.join(rag_db_dir, f"part_{p}.index")
+            map_path = os.path.join(rag_db_dir, f"map_part_{p}.json")
+            out_path = os.path.join(rag_db_dir, f"outline_part_{p}.md")
+            
+            if not os.path.exists(idx_path) or not os.path.exists(map_path):
+                continue
+                
+            with open(map_path, 'r', encoding='utf-8') as f:
+                part_map = json.load(f)
+                all_mapping.extend(part_map)
+                
+            part_index = faiss.read_index(idx_path)
+            if main_index is None:
+                main_index = faiss.IndexFlatL2(part_index.d)
+                
+            vectors = np.zeros((part_index.ntotal, part_index.d), dtype=np.float32)
+            part_index.reconstruct_n(0, part_index.ntotal, vectors)
+            main_index.add(vectors)
+            
+            # 处理 Markdown 大纲拼接
+            if os.path.exists(out_path):
+                with open(out_path, 'r', encoding='utf-8') as f:
+                    outline_content.append(f.read())
+            
+            del part_index
+            del vectors
+            gc.collect()
+
+        # 重新排序重写全局映射表 ID，确保统一
+        for i, item in enumerate(all_mapping):
+            item["id"] = i
+
+        atomic_write(os.path.join(rag_db_dir, "summary_to_raw_mapping.json"), all_mapping, data_type='json')
+        atomic_write(os.path.join(rag_db_dir, "plot_summary.index"), main_index, data_type='faiss')
+        atomic_write(outline_path, "\n".join(outline_content), data_type='text')
+        
+        # 物理清扫战场碎片
+        for p in range(1, total_parts + 1):
+            for suffix in [".index", ".json", ".md"]:
+                try: os.remove(os.path.join(rag_db_dir, f"part_{p}{suffix}" if suffix == ".index" else (f"map_part_{p}.json" if suffix == ".json" else f"outline_part_{p}.md")))
+                except: pass
+                
+        cp_path = os.path.join(rag_db_dir, "checkpoint.json")
+        if os.path.exists(cp_path):
+            os.remove(cp_path)
+            
+        log_func("[INFO] 重载模式大纲合成与 RAG 建立完毕。")
+
+    @staticmethod
     def execute_compression(original_path, chunk_size, log_func, project_name=None):
         novel_name = os.path.splitext(os.path.basename(original_path))[0]
         style_dir = os.path.join(STYLE_DIR, f"{novel_name}_style_imitation")
@@ -118,97 +203,170 @@ class LocalPlotCompressionApp(HeadlessBaseTask):
             project_dir = os.path.join(PROJ_DIR, project_name)
             os.makedirs(project_dir, exist_ok=True)
 
-        try:
-            full_text = smart_read_text(original_path)
-        except Exception as e:
-            log_func(f"[ERROR] 读取原文失败: {e}")
-            return False
-
         global_vocab = LocalPlotCompressionApp.load_global_vocab(vocab_path)
         if not global_vocab:
             log_func("[WARN] 警告：未发现 f3a 专属词库，将完全依赖 Jieba 提取本章实体。")
 
-        log_func(f"正在进行智能章节切割与合并 (阈值: {chunk_size} 字)...")
-        chunks_data = LocalPlotCompressionApp.split_by_chapters(full_text, max_len=chunk_size)
-        total_chunks = len(chunks_data)
-        log_func(f"原文已动态合并为 {total_chunks} 个叙事块。")
+        file_size = os.path.getsize(original_path)
+        THRESHOLD_10MB = 10 * 1024 * 1024
 
-        log_func("正在本地扫描提取各模块高频核心实体...")
-        summaries = []
-        mapping_data = []
-        
-        # 准备大纲内容
-        outline_content = ["# 核心事件与实体分布大纲 (本地伪摘要版)\n"]
-        for idx, item in enumerate(chunks_data):
-            titles_str = "、".join(item["titles"])
-            keywords = LocalPlotCompressionApp.extract_chunk_keywords(item["text"], global_vocab)
-            keywords_str = "，".join(keywords)
+        if file_size < THRESHOLD_10MB:
+            # ==========================================
+            # 内存直通车模式
+            # ==========================================
+            log_func(f"[INFO] 文本 ({file_size/1024/1024:.2f} MB) 触发高速直通车模式...")
+            full_text = smart_read_text(original_path)
+            chunks_data = LocalPlotCompressionApp.split_by_chapters(full_text, max_len=chunk_size)
             
-            pseudo_summary = f"包含章节：{titles_str}\n本阶段出场核心实体/高频词：{keywords_str}"
-            summaries.append(pseudo_summary)
+            summaries = []
+            mapping_data = []
+            outline_content = ["# 核心事件与实体分布大纲 (本地伪摘要版)\n"]
             
-            mapping_data.append({
-                "id": idx,
-                "summary": pseudo_summary,
-                "raw_chunk": item["text"]
-            })
-            outline_content.append(f"### 叙事块 {idx+1}\n{pseudo_summary}\n")
-            
-        try:
+            for idx, item in enumerate(chunks_data):
+                titles_str = "、".join(item["titles"])
+                keywords = LocalPlotCompressionApp.extract_chunk_keywords(item["text"], global_vocab)
+                keywords_str = "，".join(keywords)
+                
+                pseudo_summary = f"包含章节：{titles_str}\n本阶段出场核心实体/高频词：{keywords_str}"
+                summaries.append(pseudo_summary)
+                
+                mapping_data.append({
+                    "id": idx,
+                    "summary": pseudo_summary,
+                    "raw_chunk": item["text"]
+                })
+                outline_content.append(f"### 叙事块 {idx+1}\n{pseudo_summary}\n")
+                
             atomic_write(outline_path, "\n".join(outline_content), data_type='text')
-        except Exception as e:
-            log_func(f"[ERROR] 大纲文件落盘失败: {e}")
-            return False
-
-        log_func("实体提取完毕！正在通过 _core_rag 加载 BAAI 模型进行分批向量化...")
-        try:
+            
             retriever = RAGRetriever()
             embedder = retriever.get_embedder()
             
-            # 【优化与防护】：对外层 summaries 数组进行宏观大分页，再交由底层小分页，双重限流防崩溃
             summary_embeddings = []
-            outer_batch_size = 50
-            total_summaries = len(summaries)
-            
-            for i in range(0, total_summaries, outer_batch_size):
-                batch_summaries = summaries[i:i+outer_batch_size]
-                log_func(f"-> 向量化进度: {min(i+outer_batch_size, total_summaries)} / {total_summaries}")
-                
-                # 保留底层的 batch_size=8 微观控制，关闭底层进度条防止日志刷屏
-                batch_embs = embedder.encode(batch_summaries, batch_size=8, show_progress_bar=False)
+            for i in range(0, len(summaries), 50):
+                batch = summaries[i:i+50]
+                batch_embs = embedder.encode(batch, batch_size=8, show_progress_bar=False)
                 summary_embeddings.extend(batch_embs)
                 
-            # 统一转换为 numpy 矩阵并写入 FAISS
             summary_embeddings_np = np.array(summary_embeddings).astype('float32')
             dimension = summary_embeddings_np.shape[1]
             index = faiss.IndexFlatL2(dimension)
             index.add(summary_embeddings_np)
             
-            try:
-                atomic_write(faiss_index_path, index, data_type='faiss')
-                atomic_write(mapping_path, mapping_data, data_type='json')
-            except Exception as e:
-                log_func(f"[ERROR] 检索库落盘失败: {e}")
-                return False
-                
-            msg = f"[INFO] 纯本地分层检索库构建完成！全程 0 API 消耗。\n文件已落盘至: {style_dir}"
+            atomic_write(faiss_index_path, index, data_type='faiss')
+            atomic_write(mapping_path, mapping_data, data_type='json')
             
-            if project_dir:
-                p_outline = os.path.join(project_dir, "plot_outlines.md")
-                shutil.copy2(outline_path, p_outline)
+        else:
+            # ==========================================
+            # 重载流式断点续传模式
+            # ==========================================
+            log_func(f"[WARN] 文本超过 10MB，切入防 OOM 流式提取构建模式...")
+            checkpoint_path = os.path.join(rag_db_dir, "checkpoint.json")
+            start_offset = 0
+            current_part = 1
+            global_chunk_idx = 0
+            
+            if os.path.exists(checkpoint_path):
+                try:
+                    with open(checkpoint_path, 'r', encoding='utf-8') as f:
+                        cp = json.load(f)
+                        start_offset = cp.get("offset", 0)
+                        current_part = cp.get("part", 1)
+                        global_chunk_idx = cp.get("chunk_idx", 0)
+                    log_func(f"[INFO] 从游标 {start_offset} (Part {current_part}) 恢复断点续传。")
+                except Exception:
+                    pass
+
+            retriever = RAGRetriever()
+            embedder = retriever.get_embedder()
+            
+            batch_summaries = []
+            batch_mapping = []
+            batch_outline = []
+            last_offset = start_offset
+            
+            for block_dict, offset in LocalPlotCompressionApp.stream_chapters_blocks(original_path, start_offset, chunk_size):
+                titles_str = "、".join(block_dict["titles"])
+                keywords = LocalPlotCompressionApp.extract_chunk_keywords(block_dict["text"], global_vocab)
+                keywords_str = "，".join(keywords)
                 
-                p_rag_dir = os.path.join(project_dir, "hierarchical_rag_db")
-                if os.path.exists(p_rag_dir):
-                    shutil.rmtree(p_rag_dir)
-                shutil.copytree(rag_db_dir, p_rag_dir)
+                pseudo_summary = f"包含章节：{titles_str}\n本阶段出场核心实体/高频词：{keywords_str}"
                 
-                msg += f"\n已同步大纲与检索库至项目目录: {project_dir}"
+                batch_summaries.append(pseudo_summary)
+                batch_mapping.append({
+                    "id": global_chunk_idx,
+                    "summary": pseudo_summary,
+                    "raw_chunk": block_dict["text"]
+                })
+                batch_outline.append(f"### 叙事块 {global_chunk_idx+1}\n{pseudo_summary}\n")
                 
-            log_func(msg)
-            return True
-        except Exception as e:
-            log_func(f"[ERROR] 向量化或存储阶段失败: {str(e)}")
-            return False
+                global_chunk_idx += 1
+                last_offset = offset
+                
+                # 满 500 块执行强制内存释放与局部落盘
+                if len(batch_summaries) >= 500:
+                    log_func(f"-> 正在压缩局部大纲卷宗 (Part {current_part})...")
+                    embeddings = embedder.encode(batch_summaries, batch_size=8, show_progress_bar=False)
+                    
+                    dimension = embeddings.shape[1]
+                    part_index = faiss.IndexFlatL2(dimension)
+                    part_index.add(np.array(embeddings).astype('float32'))
+                    
+                    faiss.write_index(part_index, os.path.join(rag_db_dir, f"part_{current_part}.index"))
+                    with open(os.path.join(rag_db_dir, f"map_part_{current_part}.json"), 'w', encoding='utf-8') as f:
+                        json.dump(batch_mapping, f, ensure_ascii=False, indent=2)
+                    with open(os.path.join(rag_db_dir, f"outline_part_{current_part}.md"), 'w', encoding='utf-8') as f:
+                        f.write("\n".join(batch_outline))
+                        
+                    current_part += 1
+                    with open(checkpoint_path, 'w', encoding='utf-8') as f:
+                        json.dump({"offset": last_offset, "part": current_part, "chunk_idx": global_chunk_idx}, f)
+                        
+                    del embeddings
+                    del part_index
+                    del batch_summaries
+                    del batch_mapping
+                    del batch_outline
+                    gc.collect()
+                    
+                    batch_summaries = []
+                    batch_mapping = []
+                    batch_outline = []
+
+            # 尾部余数处理
+            if batch_summaries:
+                embeddings = embedder.encode(batch_summaries, batch_size=8, show_progress_bar=False)
+                dimension = embeddings.shape[1]
+                part_index = faiss.IndexFlatL2(dimension)
+                part_index.add(np.array(embeddings).astype('float32'))
+                
+                faiss.write_index(part_index, os.path.join(rag_db_dir, f"part_{current_part}.index"))
+                with open(os.path.join(rag_db_dir, f"map_part_{current_part}.json"), 'w', encoding='utf-8') as f:
+                    json.dump(batch_mapping, f, ensure_ascii=False, indent=2)
+                with open(os.path.join(rag_db_dir, f"outline_part_{current_part}.md"), 'w', encoding='utf-8') as f:
+                    f.write("\n".join(batch_outline))
+                    
+                del embeddings
+                del part_index
+                gc.collect()
+
+            # 阶段四执行组装
+            LocalPlotCompressionApp.merge_compression_parts(rag_db_dir, outline_path, current_part, log_func)
+
+        # 统一执行双重分发：将编译好的大纲与检索库同步至指定的工程目录下
+        msg = f"[INFO] 结构压缩与检索库全链完备。\n文件已落盘至: {style_dir}"
+        if project_dir:
+            p_outline = os.path.join(project_dir, "plot_outlines.md")
+            shutil.copy2(outline_path, p_outline)
+            
+            p_rag_dir = os.path.join(project_dir, "hierarchical_rag_db")
+            if os.path.exists(p_rag_dir):
+                shutil.rmtree(p_rag_dir)
+            shutil.copytree(rag_db_dir, p_rag_dir)
+            msg += f"\n已同步大纲与检索库至项目核心目录: {project_dir}"
+            
+        log_func(msg)
+        return True
 
 def run_headless(target_file, project_name=None):
     import sys

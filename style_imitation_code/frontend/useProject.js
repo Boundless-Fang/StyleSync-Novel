@@ -131,36 +131,81 @@ export function useProject() {
         showChapterModal.value = true; 
     }; 
 
-    const confirmCreateChapter = async () => { 
+    const confirmCreateChapter = async (forceOverwrite = false) => { 
         let finalName = `第${newChapterNum.value}章`; 
         if (newChapterTitle.value.trim()) { 
             finalName += `_${newChapterTitle.value.trim()}`; 
         } 
-
+ 
         try { 
-            const res = await fetch(`/api/projects/${currentProject.value}/chapters/${finalName}`, { method: 'POST' }); 
+            let url = `/api/projects/${currentProject.value}/chapters/${finalName}`; 
+            if (forceOverwrite) { 
+                url += `?force_overwrite=true`; 
+            } 
+            
+            const res = await fetch(url, { method: 'POST' }); 
+            
+            // 拦截 409 冲突状态码，触发用户二次确认 
+            if (res.status === 409) { 
+                const errorData = await res.json(); 
+                if (errorData.detail === "FILE_EXISTS") { 
+                    if (window.confirm(`章节 [${finalName}] 已存在，是否强制覆盖原文件？\n警告：此操作不可逆！`)) { 
+                        return await confirmCreateChapter(true); 
+                    } else { 
+                        return null; 
+                    } 
+                } 
+            } 
+ 
             if (res.ok) { 
                 await fetchChapters(); 
                 currentChapter.value = finalName + '.txt'; 
                 showChapterModal.value = false; 
-                return finalName; // 返回名称供 workflow 同步
+                return finalName; 
             } else { 
-                alert("创建失败，请检查后端状态。"); 
+                alert("创建或覆盖失败，目标文件可能被系统锁定。"); 
             } 
         } catch (e) { 
             alert(`请求异常: ${e.message}`); 
         } 
     }; 
-
-    const renameChapter = async () => {
-        const oldName = currentChapter.value.replace('.txt', '');
-        const name = prompt("覆写原章节名：", oldName);
-        if(name && name.trim() && name !== oldName) {
-            await fetch(`/api/projects/${currentProject.value}/chapters/${oldName}?new_name=${name.trim()}`, { method: 'POST' });
-            await fetchChapters();
-            currentChapter.value = name.trim() + '.txt';
-        }
-    };
+ 
+    const executeRename = async (oldName, newName, forceOverwrite) => { 
+        let url = `/api/projects/${currentProject.value}/chapters/${oldName}?new_name=${newName}`; 
+        if (forceOverwrite) { 
+            url += `&force_overwrite=true`; 
+        } 
+        try { 
+            const res = await fetch(url, { method: 'POST' }); 
+            
+            if (res.status === 409) { 
+                const errorData = await res.json(); 
+                if (errorData.detail === "FILE_EXISTS") { 
+                    if (window.confirm(`目标章节名 [${newName}] 已被占用，是否强制覆盖该文件？\n警告：被覆盖的章节数据将永久丢失！`)) { 
+                        await executeRename(oldName, newName, true); 
+                    } 
+                    return; 
+                } 
+            } 
+            
+            if (res.ok) { 
+                await fetchChapters(); 
+                currentChapter.value = newName + '.txt'; 
+            } else { 
+                alert("重命名失败，目标文件可能被系统锁定。"); 
+            } 
+        } catch (e) { 
+            alert(`重命名请求异常: ${e.message}`); 
+        } 
+    }; 
+ 
+    const renameChapter = async () => { 
+        const oldName = currentChapter.value.replace('.txt', ''); 
+        const name = prompt("覆写原章节名：", oldName); 
+        if (name && name.trim() && name !== oldName) { 
+            await executeRename(oldName, name.trim(), false); 
+        } 
+    }; 
 
     const importToNovel = async (text) => {
         if(!currentProject.value) return;
