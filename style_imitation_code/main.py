@@ -7,8 +7,10 @@ load_dotenv()
 
 # 【必须放在最前面】：在导入任何第三方库之前，强行设置全局镜像源！
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+
 # 针对 Windows 强制禁用软链接，解决 WinError 14007 错误
 os.environ["HF_HUB_DISABLE_SYMLINKS"] = "1"
+
 # 预设模型缓存路径，有时能绕过权限问题
 os.environ["HUGGINGFACE_HUB_CACHE"] = r"D:\StyleSync-Novel\huggingface\hub"
 
@@ -16,7 +18,6 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-# 【变更】：移除 Jinja2Templates，引入 FileResponse
 from fastapi.responses import FileResponse
 
 from api import router
@@ -27,7 +28,7 @@ app = FastAPI(title="DeepSeek Ultimate Pro + Writer")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -36,6 +37,7 @@ app.add_middleware(
 app.include_router(router)
 
 # ================= 核心修改区 =================
+
 # 1. 静态资源（js, css）必须移到 /static 路径下
 app.mount("/static", StaticFiles(directory=os.path.join(CODE_DIR, "frontend")), name="static")
 
@@ -44,6 +46,7 @@ app.mount("/static", StaticFiles(directory=os.path.join(CODE_DIR, "frontend")), 
 async def serve_frontend():
     html_path = os.path.join(CODE_DIR, "frontend", "index.html")
     return FileResponse(html_path)
+
 # ==============================================
 
 @app.on_event("startup")

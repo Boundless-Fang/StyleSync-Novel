@@ -7,8 +7,8 @@ import shutil
 import glob
 import json
 import asyncio
-import time      
-import random    
+import time
+import random
 
 # 动态获取系统临时目录构建独立沙箱
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -100,7 +100,7 @@ def smart_read_text(file_path, max_len=None):
     if basename.startswith("TKT-"):
         try:
             file_path = resolve_sandbox_ticket(basename)
-        except Exception as e:
+        except (ValueError, FileNotFoundError, PermissionError) as e:
             raise RuntimeError(f"票据解析拦截: {mask_sensitive_info(str(e))}")
 
     encodings_to_try = ['utf-8', 'gb18030', 'utf-16']
@@ -122,12 +122,12 @@ def smart_read_text(file_path, max_len=None):
         chinese_chars = re.findall(r'[\u4e00-\u9fa5，。！？“”]', sample)
         
         if len(sample) > 100 and (len(chinese_chars) / len(sample)) < 0.2:
-            raise Exception("文件读取后汉字密度过低，判定为乱码或格式损坏，已拦截。")
+            raise ValueError("文件读取后汉字密度过低，判定为乱码或格式损坏，已拦截。")
             
         print("[WARN] 警告：文件存在非法字节，已强行修复并清理乱码碎片。")
         return text
         
-    except Exception as e:
+    except (OSError, ValueError) as e:
         error_msg = f"文件解析彻底失败: {mask_sensitive_info(str(e))}"
         print(f"[ERROR] {error_msg}")
         raise RuntimeError(error_msg)
@@ -138,7 +138,7 @@ def smart_yield_text(file_path: str, chunk_size: int = 8192, high_water_mark: in
     if basename.startswith("TKT-"):
         try:
             file_path = resolve_sandbox_ticket(basename)
-        except Exception as e:
+        except (ValueError, FileNotFoundError, PermissionError) as e:
             raise RuntimeError(f"票据解析拦截: {mask_sensitive_info(str(e))}")
 
     encodings_to_try = ['utf-8', 'gb18030', 'utf-16']
@@ -179,7 +179,7 @@ def smart_yield_text(file_path: str, chunk_size: int = 8192, high_water_mark: in
                     yield buffer[:last_newline_idx + 1]
                     buffer = buffer[last_newline_idx + 1:]
                     
-    except Exception as e:
+    except OSError as e:
         error_msg = f"流式文件解析异常: {mask_sensitive_info(str(e))}"
         print(f"[ERROR] {error_msg}")
         raise RuntimeError(error_msg)
@@ -206,8 +206,8 @@ def resolve_sandbox_path(base_dir: str, user_input_path: str, allowed_extensions
 
 def atomic_write(target_path: str, data, data_type: str = 'text'):
     """
-    全局通用原子写入器 (Atomic Writer) - 重构版
-    彻底修复 Windows 独占锁导致的不可逆数据丢失缺陷。
+    全局通用原子写入器 (Atomic Writer)
+    采用本地重试与备份降级机制，契合单机桌面端 Fail-Fast 原则。
     """
     dirname = os.path.dirname(target_path)
     if dirname:
@@ -228,10 +228,10 @@ def atomic_write(target_path: str, data, data_type: str = 'text'):
             with open(temp_path, 'w', encoding='utf-8') as f:
                 f.write(str(data))
                 
-        # 3. 延长的防惊群退避机制
-        max_retries = 10     # 次数翻倍
-        base_delay = 0.2     # 基础延迟翻4倍
-        max_delay = 3.0      # 单次休眠封顶 3 秒
+        # 3. 适度的防惊群退避机制 (针对本地杀毒软件或短暂占用)
+        max_retries = 10     
+        base_delay = 0.2     
+        max_delay = 3.0      
         
         for attempt in range(max_retries):
             try:
@@ -244,7 +244,7 @@ def atomic_write(target_path: str, data, data_type: str = 'text'):
                     time.sleep(sleep_time)
                     continue
                 else:
-                    # 4. 核心避险：超越重试上限后，保留孤儿临时文件，严禁删除数据！
+                    # 4. 核心避险：超越重试上限后，保留孤儿临时文件作为备份，保障 AI 算力不白费
                     backup_path = f"{target_path}.backup-{int(time.time())}.txt"
                     try:
                         os.replace(temp_path, backup_path)
@@ -263,12 +263,12 @@ def atomic_write(target_path: str, data, data_type: str = 'text'):
         raise RuntimeError(f"原子写入事务失败，详情: {str(e)}")
 
 class AsyncFileLockManager:
-    """全局单例：文件级细粒度异步锁状态机（常驻内存池）"""
+    """全局单例：文件级细粒度异步锁状态机（支持安全回收）"""
     _locks = {}
     _dict_lock = asyncio.Lock()
 
 class async_file_lock:
-    """生产级文件读写异步互斥锁"""
+    """生产级文件读写异步互斥锁（带用毕清理机制）"""
     def __init__(self, file_path: str):
         if not file_path:
             raise ValueError("系统拦截：文件路径不能为空")
@@ -285,16 +285,23 @@ class async_file_lock:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         self.lock.release()
+        # 极简清理机制：如果这把锁被释放后，没有其他协程在排队等待它，就从字典中移除，防止内存泄漏
+        async with AsyncFileLockManager._dict_lock:
+            if not self.lock.locked() and self.norm_path in AsyncFileLockManager._locks:
+                del AsyncFileLockManager._locks[self.norm_path]
 
 async def async_smart_read_text(file_path: str, max_len: int = None) -> str:
+    """带有独立文件级互斥锁的异步读取，绝不阻塞全局"""
     async with async_file_lock(file_path):
         return await asyncio.to_thread(smart_read_text, file_path, max_len)
 
 async def async_atomic_write(target_path: str, data, data_type: str = 'text') -> bool:
+    """带有独立文件级互斥锁的异步写入，绝不阻塞全局"""
     async with async_file_lock(target_path):
         return await asyncio.to_thread(atomic_write, target_path, data, data_type)
 
 async def async_append_text(target_path: str, content: str) -> bool:
+    """带有独立文件级互斥锁的异步追加，绝不阻塞全局"""
     def _append():
         with open(target_path, "a", encoding="utf-8") as f:
             f.write(content)

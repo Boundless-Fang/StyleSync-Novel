@@ -198,8 +198,19 @@ async def create_or_rename_chapter(proj_name: str, chap_name: str, new_name: str
     def _execute_chapter_fs_modification(): 
         if new_name: 
             if source_path != target_path: 
-                # 使用 replace 替代 rename，支持 Windows 环境下的原子级覆盖 
-                os.replace(source_path, target_path) 
+                # 引入指数退避重试机制，解决 Windows 环境下杀毒软件或编辑器的瞬间文件独占 (WinError 32)
+                max_retries = 10
+                base_delay = 0.2
+                for attempt in range(max_retries):
+                    try:
+                        os.replace(source_path, target_path)
+                        break
+                    except PermissionError:
+                        if attempt < max_retries - 1:
+                            import time, random
+                            time.sleep(base_delay * (1.5 ** attempt) + random.uniform(0, 0.1))
+                        else:
+                            raise PermissionError("目标文件被系统底层或外部进程彻底死锁，超越重试上限。")
         else: 
             with open(target_path, 'w', encoding='utf-8') as f: 
                 pass 
@@ -208,8 +219,8 @@ async def create_or_rename_chapter(proj_name: str, chap_name: str, new_name: str
         import asyncio 
         await asyncio.to_thread(_execute_chapter_fs_modification) 
         return {"status": "success"} 
-    except PermissionError: 
-        print("[ERROR] 章节覆盖失败: 目标文件被系统独占锁定 (WinError 32)") 
+    except PermissionError as e: 
+        print(f"[ERROR] 章节覆盖失败: {e}") 
         raise HTTPException(status_code=500, detail="文件操作失败：目标文件正被其他进程独占锁定") 
     except OSError: 
         print("[ERROR] 章节操作失败: 存储级异常") 
@@ -299,6 +310,7 @@ async def update_project_setting(proj_name: str, file_path: str, update: Setting
 
     try:
         # 在异步线程中保障目录存在，避免阻塞事件循环
+        import asyncio
         await asyncio.to_thread(os.makedirs, os.path.dirname(target_path), exist_ok=True)
         # 带有互斥锁的异步非阻塞原子写入
         await async_atomic_write(target_path, update.content, 'text')
