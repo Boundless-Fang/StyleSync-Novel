@@ -23,7 +23,7 @@
 
         <div class="flex-1 overflow-y-auto p-4 space-y-6">
             <div>
-                <h3 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">📺 布局与显示</h3>
+                <h3 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3"><i class="fa-solid fa-display mr-1"></i> 布局与显示</h3>
                 <label class="flex items-center space-x-2 cursor-pointer mb-3">
                     <input type="checkbox" v-model="config.showWorkspace" class="rounded text-blue-600 focus:ring-blue-500">
                     <span class="text-sm font-medium">开启小说工作台</span>
@@ -39,7 +39,7 @@
             </div>
 
             <div class="border-t border-gray-100 pt-4">
-                <h3 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">📋 任务队列</h3>
+                <h3 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3"><i class="fa-solid fa-list-check mr-1"></i> 任务队列</h3>
                 <div v-if="taskList.length === 0" class="text-xs text-gray-400 text-center py-2">暂无任务记录</div>
                 <div class="space-y-2">
                     <div v-for="task in visibleTasks" :key="task.id" 
@@ -96,7 +96,7 @@
             <hr class="border-gray-100">
 
             <div>
-                <h3 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">🌍 API与防护</h3>
+                <h3 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3"><i class="fa-solid fa-shield-halved mr-1"></i> API与防护</h3>
                 <input type="password" v-model="config.apiKey" placeholder="DeepSeek API Key" class="w-full text-sm p-2 border border-gray-300 rounded focus:ring-2 focus:ring-blue-500 outline-none mb-2">
                 <textarea v-model="config.globalForbidden" placeholder="全局禁用词 (逗号分隔)" class="w-full text-sm p-2 border border-gray-300 rounded focus:ring-2 focus:ring-blue-500 h-16 outline-none mb-2"></textarea>
                 
@@ -314,6 +314,7 @@
                     
                     <label class="text-xs text-gray-500 block mb-1">执行脚本类型</label>
                     <select v-model="workflowProjectScript" class="w-full text-sm border border-gray-300 rounded p-2 mb-3 bg-gray-50 outline-none">
+                        <option value="f4c">f4c - 构建工程前文记忆库</option>
                         <option value="f4a">f4a - 设定补全 (世界观/角色)</option>
                         <option value="f5a">f5a - 章节大纲生成</option>
                         <option value="f5b">f5b - 小说正文生成</option>
@@ -466,16 +467,26 @@
                         <textarea v-model="workflowChapterBrief" placeholder="输入本章发生的核心事件..." class="w-full text-sm border border-gray-300 rounded p-2 h-20 outline-none focus:ring-1 focus:ring-blue-500"></textarea>
                     </div>
 
-                    <div v-if="['f5a', 'f5b'].includes(workflowProjectScript)" class="mb-3 flex items-center bg-blue-50 p-2 rounded border border-blue-100">
-                        <label class="flex items-center gap-2 text-xs font-bold text-blue-700 cursor-pointer">
-                            <input type="checkbox" v-model="globalAutoValidate" class="accent-blue-600 w-4 h-4 cursor-pointer">
-                            开启全局自动校验(任务完成后自动执行f7宽松校验)
-                        </label>
+                    <div v-if="['f5a', 'f5b'].includes(workflowProjectScript)" class="mb-3 space-y-2">
+                        <div class="flex items-center bg-purple-50 p-2 rounded border border-purple-100">
+                            <label class="flex items-center gap-2 text-xs font-bold text-purple-700 cursor-pointer">
+                                <input type="checkbox" v-model="globalAutoMemory" class="accent-purple-600 w-4 h-4 cursor-pointer">
+                                开启自动记忆构建 (生成大纲/正文前，自动执行 f4c 提取前文)
+                            </label>
+                        </div>
+                        <div class="flex items-center bg-blue-50 p-2 rounded border border-blue-100">
+                            <label class="flex items-center gap-2 text-xs font-bold text-blue-700 cursor-pointer">
+                                <input type="checkbox" v-model="globalAutoValidate" class="accent-blue-600 w-4 h-4 cursor-pointer">
+                                开启全局自动校验 (任务完成后，自动执行 f7 宽松校验)
+                            </label>
+                        </div>
                     </div>
 
                     <button @click="runProjectScript" :disabled="!currentProject" class="w-full py-2 bg-green-50 hover:bg-green-100 text-green-700 disabled:opacity-50 text-sm font-medium rounded transition-colors border border-green-200">
                         执行创作脚本
                     </button>
+                    
+                    <p class="text-xs text-red-500 mt-2 text-center"><i class="fa-solid fa-triangle-exclamation"></i> 警告：执行期间严禁使用外部编辑器打开或保存目标文件，以防锁死。</p>
                 </div>
             </div>
 
@@ -494,6 +505,7 @@
                             开始上传
                         </button>
                     </div>
+                    <p class="text-xs text-red-500 mt-2"><i class="fa-solid fa-circle-exclamation"></i> 提示：为保证向量化内存安全，建议单文件不超过50MB。</p>
                 </div>
 
                 <label class="text-xs text-gray-500 block mb-1">目标原著文件 (reference_novels)</label>
@@ -621,6 +633,8 @@
                         <span v-if="!isAutoRunning"><i class="fa-solid fa-play mr-1"></i> 一键执行全自动流水线</span>
                         <span v-else><i class="fa-solid fa-spinner fa-spin mr-1"></i> 流水线执行中...</span>
                     </button>
+                    
+                    <p class="text-xs text-red-500 mt-2 text-center"><i class="fa-solid fa-triangle-exclamation"></i> 警告：执行期间严禁使用外部编辑器打开或保存目标文件，以防锁死。</p>
 
                     <div v-if="isAutoPaused" class="mt-4 p-4 bg-yellow-50 border border-yellow-300 rounded-lg shadow-sm">
                         <h4 class="text-sm font-bold text-yellow-800 mb-2"><i class="fa-solid fa-hand"></i> 步骤暂停：请确认需提取的角色</h4>
@@ -677,6 +691,7 @@
                 <button v-if="styleExtractMode === 'manual'" @click="runStyleScript" :disabled="!selectedReference" class="w-full py-2 bg-blue-50 hover:bg-blue-100 text-blue-700 disabled:opacity-50 text-sm font-medium rounded transition-colors border border-blue-200">
                     执行提取脚本 (单步)
                 </button>
+                <p v-if="styleExtractMode === 'manual'" class="text-xs text-red-500 mt-2 text-center"><i class="fa-solid fa-triangle-exclamation"></i> 警告：执行期间严禁使用外部编辑器打开或保存目标文件，以防锁死。</p>
             </div>
         </div>
 

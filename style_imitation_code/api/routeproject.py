@@ -180,24 +180,51 @@ async def get_characters(proj_name: str):
         return []
     return [os.path.splitext(f)[0] for f in os.listdir(char_dir) if f.endswith(".md")]
 
-@router.post("/api/projects/{proj_name}/chapters/{chap_name}")
-async def create_or_rename_chapter(proj_name: str, chap_name: str, new_name: str = None):
-    content_dir = os.path.join(PROJ_DIR, proj_name, "content")
+@router.post("/api/projects/{proj_name}/chapters/{chap_name}") 
+async def create_or_rename_chapter(proj_name: str, chap_name: str, new_name: str = None, force_overwrite: bool = False): 
+    content_dir = os.path.join(PROJ_DIR, proj_name, "content") 
     
-    # 核心修复(P1)：将可能引发阻塞的 os.rename 和 open().close() 卸载至后台线程
-    def _execute_chapter_fs_modification():
-        if new_name:
-            os.rename(os.path.join(content_dir, f"{chap_name}.txt"), os.path.join(content_dir, f"{new_name}.txt"))
-        else:
-            open(os.path.join(content_dir, f"{chap_name}.txt"), 'w', encoding='utf-8').close()
-
-    try:
-        import asyncio
-        await asyncio.to_thread(_execute_chapter_fs_modification)
-        return {"status": "success"}
-    except OSError as e:
-        print(f"[ERROR] 章节操作失败: 存储级异常")
-        raise HTTPException(status_code=500, detail="执行章节系统文件操作遭遇异常")
+    target_name = new_name if new_name else chap_name 
+    target_path = os.path.join(content_dir, f"{target_name}.txt") 
+    source_path = os.path.join(content_dir, f"{chap_name}.txt") 
+ 
+    # 前置文件存在性探针与防呆拦截机制 
+    if os.path.exists(target_path) and not force_overwrite: 
+        # 若为同名重命名（无实际变更），直接放行 
+        if new_name and source_path == target_path: 
+            return {"status": "success"} 
+        raise HTTPException(status_code=409, detail="FILE_EXISTS") 
+ 
+    def _execute_chapter_fs_modification(): 
+        if new_name: 
+            if source_path != target_path: 
+                # 引入指数退避重试机制，解决 Windows 环境下杀毒软件或编辑器的瞬间文件独占 (WinError 32)
+                max_retries = 10
+                base_delay = 0.2
+                for attempt in range(max_retries):
+                    try:
+                        os.replace(source_path, target_path)
+                        break
+                    except PermissionError:
+                        if attempt < max_retries - 1:
+                            import time, random
+                            time.sleep(base_delay * (1.5 ** attempt) + random.uniform(0, 0.1))
+                        else:
+                            raise PermissionError("目标文件被系统底层或外部进程彻底死锁，超越重试上限。")
+        else: 
+            with open(target_path, 'w', encoding='utf-8') as f: 
+                pass 
+ 
+    try: 
+        import asyncio 
+        await asyncio.to_thread(_execute_chapter_fs_modification) 
+        return {"status": "success"} 
+    except PermissionError as e: 
+        print(f"[ERROR] 章节覆盖失败: {e}") 
+        raise HTTPException(status_code=500, detail="文件操作失败：目标文件正被其他进程独占锁定") 
+    except OSError: 
+        print("[ERROR] 章节操作失败: 存储级异常") 
+        raise HTTPException(status_code=500, detail="执行章节系统文件操作遭遇异常") 
 
 @router.get("/api/projects/{proj_name}/chapters/{chap_name}/content")
 async def get_chapter_content(proj_name: str, chap_name: str):
@@ -283,6 +310,7 @@ async def update_project_setting(proj_name: str, file_path: str, update: Setting
 
     try:
         # 在异步线程中保障目录存在，避免阻塞事件循环
+        import asyncio
         await asyncio.to_thread(os.makedirs, os.path.dirname(target_path), exist_ok=True)
         # 带有互斥锁的异步非阻塞原子写入
         await async_atomic_write(target_path, update.content, 'text')

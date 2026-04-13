@@ -13,8 +13,9 @@ export function useWorkflow(projectModule) {
     const isAutoPaused = ref(false); 
     const cancelAutoFlag = ref(false); 
     
-    // 【新增】：全局自动校验布尔值状态
     const globalAutoValidate = ref(false);
+    // 【修改点】：新增前置记忆构建全局状态变量
+    const globalAutoMemory = ref(false);
     
     const fileInput = ref(null);
     const uploadFileName = ref('');
@@ -258,7 +259,25 @@ export function useWorkflow(projectModule) {
         
         const curProj = projectModule.currentProject.value;
         
-        // 【新增】：抽象化自动文本校验调起函数
+        // 【修改点】：抽象化自动前置记忆构建调起函数
+        const triggerAutoMemory = async () => {
+            if (!globalAutoMemory.value) return;
+            try {
+                let url = `/api/scripts/f4c?project_name=${encodeURIComponent(curProj)}&force=true`;
+                const mRes = await fetch(url, { method: 'POST' });
+                const mData = await mRes.json();
+                if (mData.error) throw new Error(mData.error);
+                if (mData.task_id) {
+                    alert(`已自动触发 [f4c] 前文记忆库构建，请耐心等待全量向量化完成...`);
+                    await waitForTask(mData.task_id);
+                    alert(`【记忆构建完毕】最新正文上下文已入库，即将开始创作任务！`);
+                }
+            } catch (e) {
+                alert(`前置记忆构建环节发生异常阻断: ${e.message}`);
+                throw e; // 抛出异常以硬性阻断后续 f5a/f5b
+            }
+        };
+
         const triggerAutoValidation = async (targetNode) => {
             if (!globalAutoValidate.value) return;
             try {
@@ -276,8 +295,16 @@ export function useWorkflow(projectModule) {
             }
         };
         
+        // ===============================================
+        // 脚本执行派发
+        // ===============================================
+
         if (workflowProjectScript.value === 'f5a') {
             if (!workflowChapterName.value || !workflowChapterBrief.value) { alert("请完善章节信息。"); return; }
+            
+            // 自动拦截卡点：先跑记忆库
+            await triggerAutoMemory();
+
             const res = await fetch('/api/scripts/f5a_outline', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ project_name: curProj, chapter_name: workflowChapterName.value, chapter_brief: workflowChapterBrief.value, model: workflowProjectModel.value })
@@ -286,7 +313,6 @@ export function useWorkflow(projectModule) {
             if (data.error) {
                 alert("执行错误: " + data.error);
             } else if (data.task_id) {
-                // 【修改】：加入 waitForTask 同步等待，并注入校验拦截链
                 await waitForTask(data.task_id);
                 await triggerAutoValidation('f5a');
             }
@@ -296,6 +322,10 @@ export function useWorkflow(projectModule) {
 
         if (workflowProjectScript.value === 'f5b') {
             if (!workflowChapterName.value) { alert("请指定章节名。"); return; }
+            
+            // 自动拦截卡点：先跑记忆库
+            await triggerAutoMemory();
+
             const res = await fetch('/api/scripts/f5b_generate', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ project_name: curProj, chapter_name: workflowChapterName.value, model: workflowProjectModel.value })
@@ -304,7 +334,6 @@ export function useWorkflow(projectModule) {
             if (data.error) { alert("执行错误: " + data.error); return; }
             
             if (data.task_id) {
-                // 【修改】：细化前端提示语，注入校验拦截链
                 alert(`生成任务已提交，完成后将自动同步！${globalAutoValidate.value ? '(将在结束后连贯执行文本校验)' : ''}`);
                 await waitForTask(data.task_id); 
                 await projectModule.fetchChapters(); 
@@ -398,7 +427,7 @@ export function useWorkflow(projectModule) {
 
     return {
         references, selectedReference, styleExtractMode, forceOverwrite, autoPipelineType, autoStyleCharNames,
-        isAutoRunning, autoRunProgress, isAutoPaused, cancelAutoFlag, globalAutoValidate, fileInput, uploadFileName, taskList, showAllTasks, visibleTasks,
+        isAutoRunning, autoRunProgress, isAutoPaused, cancelAutoFlag, globalAutoValidate, globalAutoMemory, fileInput, uploadFileName, taskList, showAllTasks, visibleTasks,
         workflowProjectScript, workflowProjectModel, workflowStyleScript, workflowStyleModel,
         recommendedChars, freqChars, customCharInput, showCharSelector, isLoadingChars, workflowCharName, workflowCharSelect,
         workflowChapterName, workflowChapterSelect, workflowChapterBrief, workflowF4aMode, workflowF4aInput,

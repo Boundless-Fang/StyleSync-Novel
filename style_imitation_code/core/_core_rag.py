@@ -31,15 +31,19 @@ class RAGCachePool:
 
     def put(self, key: str, value: tuple):
         with self.lock:
+            import gc
+            
             if key in self.cache:
                 old_val = self.cache.pop(key)
                 del old_val
+                gc.collect()  # 强制操作系统立即回收旧 FAISS 索引绑定的 C++ 堆内存
                 
             self.cache[key] = value
             
             while len(self.cache) > self.capacity:
                 _, popped_val = self.cache.popitem(last=False)
                 del popped_val
+                gc.collect()  # 强制操作系统立即回收淘汰的 C++ 堆内存
 
 _global_rag_cache = RAGCachePool(capacity=1)
 

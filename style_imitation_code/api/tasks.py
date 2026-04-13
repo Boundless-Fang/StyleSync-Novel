@@ -7,7 +7,7 @@ from datetime import datetime
 from .config import PROJ_DIR
 
 # 引入核心层的原子写与安全模块
-from core._core_utils import atomic_write, mask_sensitive_info
+from core._core_utils import atomic_write, async_atomic_write, mask_sensitive_info
 
 # 系统全局并发控制与防护
 background_semaphore = asyncio.Semaphore(1)
@@ -18,13 +18,16 @@ TASKS = {}
 TASKS_DB_PATH = os.path.join(PROJ_DIR, "system_tasks_db.json")
 MAX_RETAINED_TASKS = 50
 
+# P1 级优化：全局日志内存高水位线（单通道最多保留 15000 字符，约 5000 汉字，足够前端滚动查看）
+MAX_LOG_BUFFER_LENGTH = 15000
+
 # I/O 互斥锁，防止并发写盘损坏文件
 db_save_lock = asyncio.Lock()
 # 内存状态互斥锁，严格保护 TASKS 字典的读写原子性
 tasks_state_lock = asyncio.Lock()
 
 def load_tasks_safe():
-    """防线四：启动时的防尸变机制 (同步执行，无需加锁)"""
+    """防线四：启动时的防尸变机制 (同步执行，无需加锁) - 懒加载自愈方案"""
     global TASKS
     if os.path.exists(TASKS_DB_PATH):
         try:
@@ -32,8 +35,9 @@ def load_tasks_safe():
                 loaded_tasks = json.load(f)
             for t_id, t_info in loaded_tasks.items():
                 if t_info.get("status") in ["running", "pending"]:
+                    # 强行清洗尸变状态，等待下一次有新任务时顺风车落盘
                     t_info["status"] = "failed"
-                    t_info["error"] = "系统拦截：检测到服务端曾发生重启或意外崩溃，该任务物理进程已丢失。"
+                    t_info["error"] = "系统重启：历史中断任务已清理。"
             TASKS.update(loaded_tasks)
         except OSError as e:
             print(f"[WARN] 历史任务数据库加载失败，文件系统读取异常: {mask_sensitive_info(str(e))}")
@@ -67,15 +71,15 @@ async def save_and_prune_tasks_async():
             snapshot = {k: v.copy() for k, v in TASKS.items()}
 
         try:
-            await asyncio.to_thread(atomic_write, TASKS_DB_PATH, snapshot, 'json')
+            # 使用基于文件级互斥锁的安全写入
+            await async_atomic_write(TASKS_DB_PATH, snapshot, 'json')
         except (RuntimeError, OSError) as e:
             print(f"[ERROR] 任务状态落盘失败: {mask_sensitive_info(str(e))}")
 
 async def run_task_safely(task_id: str, cmd_list: list, api_key: str = None):
     """
-    核心异步调度器 (已重构)：
-    1. 彻底废除外部 Thread 监控，消除 PID 错杀风险与线程资源泄露。
-    2. 利用 asyncio.wait_for 实现原生句柄级的超时销毁。
+    核心异步调度器：
+    利用 asyncio.wait_for 实现原生句柄级的超时销毁，并包含内存防爆截断。
     """
     async with tasks_state_lock:
         if task_id in TASKS:
@@ -126,20 +130,27 @@ async def run_task_safely(task_id: str, cmd_list: list, api_key: str = None):
                                 if task_id in TASKS:
                                     TASKS[task_id]["tokens"] = int(token_matches[-1])
 
+                    # 滑动窗口日志截断，严格阻断内存泄漏
                     if flush_counter >= 50:
                         async with tasks_state_lock:
                             if task_id in TASKS:
-                                TASKS[task_id][key] += "".join(buffer)
+                                new_text = "".join(buffer)
+                                merged_text = TASKS[task_id][key] + new_text
+                                # 仅保留尾部核心窗口，抛弃冗余旧数据
+                                TASKS[task_id][key] = merged_text[-MAX_LOG_BUFFER_LENGTH:]
                         buffer.clear()
                         flush_counter = 0
 
+                # 处理尾部剩余的 buffer
                 if buffer:
                     async with tasks_state_lock:
                         if task_id in TASKS:
-                            TASKS[task_id][key] += "".join(buffer)
+                            new_text = "".join(buffer)
+                            merged_text = TASKS[task_id][key] + new_text
+                            TASKS[task_id][key] = merged_text[-MAX_LOG_BUFFER_LENGTH:]
 
             try:
-                # 设定 1800 秒强制超时，通过原生 Process 对象管理生命周期
+                # 设定 1800 秒强制超时
                 await asyncio.wait_for(
                     asyncio.gather(
                         pipe_reader(process.stdout, "stdout"),
@@ -155,17 +166,17 @@ async def run_task_safely(task_id: str, cmd_list: list, api_key: str = None):
                         TASKS[task_id]["status"] = "success" if process.returncode == 0 else "failed"
                                 
             except asyncio.TimeoutError: 
-                # 方案一核心逻辑：直接操作进程句柄，而非盲杀 PID
+                # 本地环境最稳妥的处理方式：直接操作进程句柄终止 Python 宿主进程
                 try: 
-                    process.kill() # 强制销毁
-                    await process.wait() # 确保句柄释放
+                    process.kill() 
+                    await process.wait() 
                 except OSError: 
                     pass
                     
                 async with tasks_state_lock:
                     if task_id in TASKS:
                         TASKS[task_id]["status"] = "failed"
-                        TASKS[task_id]["error"] = "超时拦截：任务执行超过 30 分钟限制，已由系统通过句柄安全销毁。"
+                        TASKS[task_id]["error"] = "超时拦截：任务执行超过 30 分钟限制，已安全释放资源进程。"
                 
     except OSError:
         async with tasks_state_lock:
