@@ -10,6 +10,7 @@ from threading import Lock
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from dotenv import load_dotenv
+from paths_config import PROJECT_ROOT, CODE_DIR
 
 # 屏蔽 transformers 模型加载时的非关键警告
 logging.getLogger("transformers.modeling_utils").setLevel(logging.ERROR)
@@ -53,10 +54,21 @@ _global_rag_cache = RAGCachePool(capacity=1)
 class DirectSiliconFlowEmbedder:
     """直接调用上游 SiliconFlow API 进行向量化，彻底斩断对本地 8000 端口的脆弱 RPC 依赖"""
     def __init__(self):
-        # 确保在脱离 Web 主进程独立运行脚本时，依然能正确加载环境变量
-        load_dotenv()
-        
-        self.api_key = os.environ.get("SILICONFLOW_API_KEY")
+        # 兼容多种启动入口：优先尝试加载 style_imitation_code/.env，再回退到项目根目录/.env
+        env_candidates = [
+            os.path.join(CODE_DIR, ".env"),
+            os.path.join(PROJECT_ROOT, ".env")
+        ]
+        for env_file in env_candidates:
+            if os.path.exists(env_file):
+                load_dotenv(dotenv_path=env_file, override=False)
+        # 若进程里存在空字符串环境变量，会阻止 dotenv 覆盖；此处做一次强制覆盖兜底
+        self.api_key = (os.environ.get("SILICONFLOW_API_KEY") or "").strip()
+        if not self.api_key:
+            for env_file in env_candidates:
+                if os.path.exists(env_file):
+                    load_dotenv(dotenv_path=env_file, override=True)
+            self.api_key = (os.environ.get("SILICONFLOW_API_KEY") or "").strip()
         if not self.api_key:
             raise ValueError("【系统拦截】未配置 SILICONFLOW_API_KEY 环境变量，无法启动向量化引擎。请检查 .env 文件。")
             
