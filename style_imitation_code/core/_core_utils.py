@@ -188,6 +188,9 @@ def resolve_sandbox_path(base_dir: str, user_input_path: str, allowed_extensions
     """基础目录守卫：将外部输入安全的限制在指定根目录内。"""
     if not user_input_path:
         raise ValueError("输入路径不能为空")
+    user_input_path = str(user_input_path).strip()
+    if re.search(r'[\r\n\t\x00]', user_input_path):
+        raise ValueError("【系统拦截】：输入路径包含非法控制字符")
 
     safe_base = os.path.normcase(os.path.realpath(os.path.abspath(base_dir)))
     raw_target = os.path.join(safe_base, user_input_path)

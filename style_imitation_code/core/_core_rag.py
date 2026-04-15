@@ -9,7 +9,8 @@ import collections
 from threading import Lock
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from dotenv import load_dotenv
+from dotenv import load_dotenv, dotenv_values, find_dotenv
+from paths_config import PROJECT_ROOT, CODE_DIR
 
 # 屏蔽 transformers 模型加载时的非关键警告
 logging.getLogger("transformers.modeling_utils").setLevel(logging.ERROR)
@@ -53,12 +54,67 @@ _global_rag_cache = RAGCachePool(capacity=1)
 class DirectSiliconFlowEmbedder:
     """直接调用上游 SiliconFlow API 进行向量化，彻底斩断对本地 8000 端口的脆弱 RPC 依赖"""
     def __init__(self):
-        # 确保在脱离 Web 主进程独立运行脚本时，依然能正确加载环境变量
-        load_dotenv()
-        
-        self.api_key = os.environ.get("SILICONFLOW_API_KEY")
+        # 兼容多种启动入口：聚合常见 .env 路径并去重
+        env_candidates = []
+        auto_found = find_dotenv(usecwd=True)
+        if auto_found:
+            env_candidates.append(auto_found)
+        env_candidates.extend([
+            os.path.join(os.getcwd(), ".env"),
+            os.path.join(CODE_DIR, ".env"),
+            os.path.join(PROJECT_ROOT, ".env")
+        ])
+        # 去重并仅保留实际存在的文件
+        env_candidates = [p for i, p in enumerate(env_candidates) if p and p not in env_candidates[:i] and os.path.exists(p)]
+
+        # 兼容变量别名：部分部署环境可能用 EMBEDDING_API_KEY、SILICONFLOW_KEY 或 APIKEY 变体
+        key_aliases = ["SILICONFLOW_API_KEY", "EMBEDDING_API_KEY", "SILICONFLOW_KEY", "SILICONFLOW_APIKEY"]
+        key_aliases_upper = {k.upper() for k in key_aliases}
+
+        def _normalize_key(key_name: str) -> str:
+            # 兼容 UTF-8 BOM、空格、大小写差异
+            return (key_name or "").lstrip("\ufeff").strip().upper()
+
+        for env_file in env_candidates:
+            if os.path.exists(env_file):
+                load_dotenv(dotenv_path=env_file, override=False)
+
+        # 先从进程环境读取（优先级最高）
+        self.api_key = ""
+        for key_name in key_aliases:
+            val = (os.environ.get(key_name) or "").strip()
+            if val:
+                self.api_key = val
+                break
+
+        # 若进程里是空值，再直接解析 .env 文件做兜底（兼容 dotenv 覆盖策略边界）
         if not self.api_key:
-            raise ValueError("【系统拦截】未配置 SILICONFLOW_API_KEY 环境变量，无法启动向量化引擎。请检查 .env 文件。")
+            for env_file in env_candidates:
+                values = dotenv_values(env_file)
+                for raw_key, raw_val in values.items():
+                    if _normalize_key(raw_key) in key_aliases_upper and raw_val and str(raw_val).strip():
+                        self.api_key = str(raw_val).strip().strip('"').strip("'")
+                        break
+                if self.api_key:
+                    break
+
+        # 最后兜底：强制覆盖再读一次
+        if not self.api_key:
+            for env_file in env_candidates:
+                load_dotenv(dotenv_path=env_file, override=True)
+            for raw_key, raw_val in os.environ.items():
+                if _normalize_key(raw_key) in key_aliases_upper and (raw_val or "").strip():
+                    self.api_key = raw_val.strip()
+                    break
+
+        if self.api_key:
+            os.environ["SILICONFLOW_API_KEY"] = self.api_key
+        if not self.api_key:
+            scanned = ", ".join(env_candidates) if env_candidates else "无可用 .env 路径"
+            raise ValueError(
+                f"【系统拦截】未配置 SILICONFLOW_API_KEY。已扫描: {scanned}。"
+                f"请在 .env 中设置 SILICONFLOW_API_KEY=你的密钥"
+            )
             
         self.endpoint = "https://api.siliconflow.cn/v1/embeddings"
         self.headers = {
