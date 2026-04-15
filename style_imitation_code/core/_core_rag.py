@@ -67,8 +67,13 @@ class DirectSiliconFlowEmbedder:
         # 去重并仅保留实际存在的文件
         env_candidates = [p for i, p in enumerate(env_candidates) if p and p not in env_candidates[:i] and os.path.exists(p)]
 
-        # 兼容变量别名：部分部署环境可能用 EMBEDDING_API_KEY 或 SILICONFLOW_KEY
-        key_aliases = ["SILICONFLOW_API_KEY", "EMBEDDING_API_KEY", "SILICONFLOW_KEY"]
+        # 兼容变量别名：部分部署环境可能用 EMBEDDING_API_KEY、SILICONFLOW_KEY 或 APIKEY 变体
+        key_aliases = ["SILICONFLOW_API_KEY", "EMBEDDING_API_KEY", "SILICONFLOW_KEY", "SILICONFLOW_APIKEY"]
+        key_aliases_upper = {k.upper() for k in key_aliases}
+
+        def _normalize_key(key_name: str) -> str:
+            # 兼容 UTF-8 BOM、空格、大小写差异
+            return (key_name or "").lstrip("\ufeff").strip().upper()
 
         for env_file in env_candidates:
             if os.path.exists(env_file):
@@ -86,10 +91,9 @@ class DirectSiliconFlowEmbedder:
         if not self.api_key:
             for env_file in env_candidates:
                 values = dotenv_values(env_file)
-                for key_name in key_aliases:
-                    val = values.get(key_name)
-                    if val and str(val).strip():
-                        self.api_key = str(val).strip().strip('"').strip("'")
+                for raw_key, raw_val in values.items():
+                    if _normalize_key(raw_key) in key_aliases_upper and raw_val and str(raw_val).strip():
+                        self.api_key = str(raw_val).strip().strip('"').strip("'")
                         break
                 if self.api_key:
                     break
@@ -98,16 +102,19 @@ class DirectSiliconFlowEmbedder:
         if not self.api_key:
             for env_file in env_candidates:
                 load_dotenv(dotenv_path=env_file, override=True)
-            for key_name in key_aliases:
-                val = (os.environ.get(key_name) or "").strip()
-                if val:
-                    self.api_key = val
+            for raw_key, raw_val in os.environ.items():
+                if _normalize_key(raw_key) in key_aliases_upper and (raw_val or "").strip():
+                    self.api_key = raw_val.strip()
                     break
 
         if self.api_key:
             os.environ["SILICONFLOW_API_KEY"] = self.api_key
         if not self.api_key:
-            raise ValueError("【系统拦截】未配置 SILICONFLOW_API_KEY 环境变量，无法启动向量化引擎。请检查 .env 文件。")
+            scanned = ", ".join(env_candidates) if env_candidates else "无可用 .env 路径"
+            raise ValueError(
+                f"【系统拦截】未配置 SILICONFLOW_API_KEY。已扫描: {scanned}。"
+                f"请在 .env 中设置 SILICONFLOW_API_KEY=你的密钥"
+            )
             
         self.endpoint = "https://api.siliconflow.cn/v1/embeddings"
         self.headers = {
