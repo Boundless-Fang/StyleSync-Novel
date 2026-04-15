@@ -4,7 +4,7 @@ import asyncio
 import re
 import subprocess
 from datetime import datetime
-from .config import PROJ_DIR
+from .config import PROJ_DIR, CODE_DIR
 
 # 引入核心层的原子写与安全模块
 from core._core_utils import atomic_write, async_atomic_write, mask_sensitive_info
@@ -94,7 +94,20 @@ async def run_task_safely(task_id: str, cmd_list: list, api_key: str = None):
     env = os.environ.copy()
     if api_key:
         env["DEEPSEEK_API_KEY"] = api_key
+    # 向后兼容：若仅配置了 EMBEDDING_API_KEY 等别名，自动映射到 SILICONFLOW_API_KEY
+    if not (env.get("SILICONFLOW_API_KEY") or "").strip():
+        for alias in ("EMBEDDING_API_KEY", "SILICONFLOW_KEY", "SILICONFLOW_APIKEY"):
+            alias_val = (env.get(alias) or "").strip()
+            if alias_val:
+                env["SILICONFLOW_API_KEY"] = alias_val
+                break
     env["PYTHONIOENCODING"] = "utf-8"
+    # 统一注入代码根路径，避免子进程执行 scripts/*.py 时出现 `No module named 'core'`
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = (
+        CODE_DIR if not existing_pythonpath
+        else os.pathsep.join([CODE_DIR, existing_pythonpath])
+    )
         
     try:
         async with background_semaphore:
@@ -102,7 +115,8 @@ async def run_task_safely(task_id: str, cmd_list: list, api_key: str = None):
                 *cmd_list,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                env=env
+                env=env,
+                cwd=CODE_DIR
             )
             
             async def pipe_reader(stream, key):

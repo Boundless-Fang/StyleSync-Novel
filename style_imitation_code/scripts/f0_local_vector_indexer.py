@@ -151,6 +151,11 @@ class GlobalIndexerGUI(HeadlessBaseTask):
 
     @staticmethod
     def run_indexing(target_file, log_func=print):
+        target_file = str(target_file or "").strip()
+        if re.search(r'[\r\n\t\x00]', target_file):
+            log_func("[ERROR] 输入文件名包含非法控制字符，请重新选择参考文件。")
+            return False
+
         if os.path.isabs(target_file):
             original_path = target_file
         else:
@@ -161,6 +166,10 @@ class GlobalIndexerGUI(HeadlessBaseTask):
             return False
 
         novel_name = os.path.splitext(os.path.basename(original_path))[0]
+        novel_name = re.sub(r'[\r\n\t\x00]', '', novel_name).strip()
+        if not novel_name:
+            log_func("[ERROR] 目标文件名无效，无法创建风格库目录。")
+            return False
         style_dir = os.path.join(STYLE_DIR, f"{novel_name}_style_imitation")
         rag_db_dir = os.path.join(style_dir, "global_rag_db")
         os.makedirs(rag_db_dir, exist_ok=True)
