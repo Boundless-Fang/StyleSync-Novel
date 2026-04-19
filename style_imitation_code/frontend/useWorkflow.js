@@ -14,7 +14,6 @@ export function useWorkflow(projectModule) {
     const cancelAutoFlag = ref(false); 
     
     const globalAutoValidate = ref(false);
-    // 【修改点】：新增前置记忆构建全局状态变量
     const globalAutoMemory = ref(false);
     
     const fileInput = ref(null);
@@ -87,7 +86,8 @@ export function useWorkflow(projectModule) {
                 await loadReferences(); 
                 selectedReference.value = formData.get('file').name; 
             } else {
-                alert('文件上传失败，请检查后端运行状态。');
+                const errData = await res.json().catch(() => ({}));
+                alert(`文件上传失败: ${errData.detail || errData.error || '后端异常'}`);
             }
         } catch(e) { alert('上传发生网络异常。'); }
     };
@@ -106,14 +106,24 @@ export function useWorkflow(projectModule) {
             const wsRes = await fetch(`/api/projects/${fakeProjName}/settings/world_settings.md`);
             if (wsRes.ok) {
                 const wsData = await wsRes.json();
-                const match = (wsData.content || "").match(/角色.*?[：:]\s*(.*)/);
-                if (match && match[1]) {
-                    const rawChars = match[1].split(/[,，、]/).map(c => c.trim()).filter(Boolean);
-                    rawChars.forEach(c => {
-                        let name = c, aliases = '';
-                        const aliasMatch = c.match(/(.+?)[(（](.+?)[)）]/);
-                        if (aliasMatch) { name = aliasMatch[1].trim(); aliases = aliasMatch[2].trim(); }
-                        if (!recommendedChars.value.find(rc => rc.name === name)) {
+                const contentStr = wsData.content || "";
+                
+                const charsSectionMatch = contentStr.match(/角色.*?[：:]\s*([\s\S]*?)(?=\n[^\n]+[：:]|\n#|$)/);
+                
+                if (charsSectionMatch && charsSectionMatch[1]) {
+                    const rawItems = charsSectionMatch[1].split(/[\n,，、;；]/);
+                    rawItems.forEach(item => {
+                        let cleanStr = item.replace(/^[\s\*\-\+>・]+/, '').trim();
+                        if (!cleanStr) return;
+
+                        let name = cleanStr;
+                        let aliases = '';
+                        const aliasMatch = cleanStr.match(/(.+?)[(（](.+?)[)）]/);
+                        if (aliasMatch) { 
+                            name = aliasMatch[1].trim(); 
+                            aliases = aliasMatch[2].trim(); 
+                        }
+                        if (name.length > 0 && !recommendedChars.value.find(rc => rc.name === name)) {
                             recommendedChars.value.push({ name, aliases, selected: true, editing: false });
                         }
                     });
@@ -183,6 +193,17 @@ export function useWorkflow(projectModule) {
         }); 
     }; 
 
+    // 核心安全修补：统一错误拦截器，防止 FastAPI detail 被静默吞噬
+    const handleApiResponse = async (res) => {
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            const errMsg = data.detail ? (typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail)) : (data.error || `HTTP 错误状态: ${res.status}`);
+            throw new Error(errMsg);
+        }
+        if (data.error) throw new Error(data.error);
+        return data;
+    };
+
     const executePipelineStep = async (step, customChar = null) => {
         if (cancelAutoFlag.value) throw new Error("用户手动终止了流水线");
         autoRunProgress.value = `${step.script} - ${step.name}`;
@@ -194,9 +215,7 @@ export function useWorkflow(projectModule) {
         if (step.script === 'f3c' && customChar) url += `&character=${encodeURIComponent(customChar)}`;
         
         const res = await fetch(url, { method: 'POST' });
-        if (!res.ok) throw new Error(`${step.script} 请求失败`);
-        const data = await res.json();
-        if (data.error) throw new Error(data.error);
+        const data = await handleApiResponse(res);
         if (data.task_id) await waitForTask(data.task_id);
         await pollTasks();
     };
@@ -259,14 +278,12 @@ export function useWorkflow(projectModule) {
         
         const curProj = projectModule.currentProject.value;
         
-        // 【修改点】：抽象化自动前置记忆构建调起函数
         const triggerAutoMemory = async () => {
             if (!globalAutoMemory.value) return;
             try {
                 let url = `/api/scripts/f4c?project_name=${encodeURIComponent(curProj)}&force=true`;
                 const mRes = await fetch(url, { method: 'POST' });
-                const mData = await mRes.json();
-                if (mData.error) throw new Error(mData.error);
+                const mData = await handleApiResponse(mRes);
                 if (mData.task_id) {
                     alert(`已自动触发 [f4c] 前文记忆库构建，请耐心等待全量向量化完成...`);
                     await waitForTask(mData.task_id);
@@ -274,7 +291,7 @@ export function useWorkflow(projectModule) {
                 }
             } catch (e) {
                 alert(`前置记忆构建环节发生异常阻断: ${e.message}`);
-                throw e; // 抛出异常以硬性阻断后续 f5a/f5b
+                throw e; 
             }
         };
 
@@ -283,8 +300,7 @@ export function useWorkflow(projectModule) {
             try {
                 let url = `/api/scripts/f7?project_name=${encodeURIComponent(curProj)}&model=${workflowProjectModel.value}&chapter_name=${encodeURIComponent(workflowChapterName.value.trim())}`;
                 const vRes = await fetch(url, { method: 'POST' });
-                const vData = await vRes.json();
-                if (vData.error) throw new Error(vData.error);
+                const vData = await handleApiResponse(vRes);
                 if (vData.task_id) {
                     alert(`已自动触发 [${targetNode}] 节点的 f7 文本校验，等待执行完成...`);
                     await waitForTask(vData.task_id);
@@ -295,26 +311,50 @@ export function useWorkflow(projectModule) {
             }
         };
         
-        // ===============================================
-        // 脚本执行派发
-        // ===============================================
+        if (workflowProjectScript.value === 'f4a') {
+            const formData = workflowF4aMode.value === 'worldview' ? f4aWorldview.value : f4aChar.value;
+            const payload = {
+                project_name: curProj,
+                mode: workflowF4aMode.value,
+                target_file: selectedReference.value || "",
+                model: workflowProjectModel.value,
+                form_data: formData
+            };
+            
+            try {
+                const res = await fetch('/api/scripts/f4a_completion', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await handleApiResponse(res);
+                if (data.task_id) {
+                    alert(`设定补全任务已提交，请在左侧控制台查看进度！`);
+                }
+            } catch (e) {
+                alert(`设定补全触发失败: ${e.message}`);
+            }
+            await pollTasks();
+            return; 
+        }
 
         if (workflowProjectScript.value === 'f5a') {
             if (!workflowChapterName.value || !workflowChapterBrief.value) { alert("请完善章节信息。"); return; }
             
-            // 自动拦截卡点：先跑记忆库
-            await triggerAutoMemory();
+            try {
+                await triggerAutoMemory();
 
-            const res = await fetch('/api/scripts/f5a_outline', {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ project_name: curProj, chapter_name: workflowChapterName.value, chapter_brief: workflowChapterBrief.value, model: workflowProjectModel.value })
-            });
-            const data = await res.json();
-            if (data.error) {
-                alert("执行错误: " + data.error);
-            } else if (data.task_id) {
-                await waitForTask(data.task_id);
-                await triggerAutoValidation('f5a');
+                const res = await fetch('/api/scripts/f5a_outline', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ project_name: curProj, chapter_name: workflowChapterName.value, chapter_brief: workflowChapterBrief.value, model: workflowProjectModel.value })
+                });
+                const data = await handleApiResponse(res);
+                if (data.task_id) {
+                    await waitForTask(data.task_id);
+                    await triggerAutoValidation('f5a');
+                }
+            } catch (e) {
+                alert(`大纲生成请求异常: ${e.message}`);
             }
             await pollTasks();
             return;
@@ -323,38 +363,45 @@ export function useWorkflow(projectModule) {
         if (workflowProjectScript.value === 'f5b') {
             if (!workflowChapterName.value) { alert("请指定章节名。"); return; }
             
-            // 自动拦截卡点：先跑记忆库
-            await triggerAutoMemory();
+            try {
+                await triggerAutoMemory();
 
-            const res = await fetch('/api/scripts/f5b_generate', {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ project_name: curProj, chapter_name: workflowChapterName.value, model: workflowProjectModel.value })
-            });
-            const data = await res.json();
-            if (data.error) { alert("执行错误: " + data.error); return; }
-            
-            if (data.task_id) {
-                alert(`生成任务已提交，完成后将自动同步！${globalAutoValidate.value ? '(将在结束后连贯执行文本校验)' : ''}`);
-                await waitForTask(data.task_id); 
-                await projectModule.fetchChapters(); 
-                projectModule.currentChapter.value = workflowChapterName.value.replace('.txt', '') + '.txt';
-                await projectModule.fetchContent(); 
+                const res = await fetch('/api/scripts/f5b_generate', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ project_name: curProj, chapter_name: workflowChapterName.value, model: workflowProjectModel.value })
+                });
+                const data = await handleApiResponse(res);
                 
-                if (globalAutoValidate.value) {
-                    await triggerAutoValidation('f5b');
-                } else {
-                    alert("章节正文生成完成！已同步显示在左侧编辑器中。");
+                if (data.task_id) {
+                    alert(`生成任务已提交，完成后将自动同步！${globalAutoValidate.value ? '(将在结束后连贯执行文本校验)' : ''}`);
+                    await waitForTask(data.task_id); 
+                    await projectModule.fetchChapters(); 
+                    projectModule.currentChapter.value = workflowChapterName.value.replace('.txt', '') + '.txt';
+                    await projectModule.fetchContent(); 
+                    
+                    if (globalAutoValidate.value) {
+                        await triggerAutoValidation('f5b');
+                    } else {
+                        alert("章节正文生成完成！已同步显示在左侧编辑器中。");
+                    }
                 }
+            } catch (e) {
+                alert(`正文生成请求异常: ${e.message}`);
             }
             await pollTasks();
             return;
         }
         
-        let url = `/api/scripts/${workflowProjectScript.value}?project_name=${encodeURIComponent(curProj)}&model=${workflowProjectModel.value}`;
-        if (['f7'].includes(workflowProjectScript.value) && workflowChapterName.value) {
-             url += `&chapter_name=${encodeURIComponent(workflowChapterName.value.trim())}`;
+        try {
+            let url = `/api/scripts/${workflowProjectScript.value}?project_name=${encodeURIComponent(curProj)}&model=${workflowProjectModel.value}`;
+            if (['f7'].includes(workflowProjectScript.value) && workflowChapterName.value) {
+                 url += `&chapter_name=${encodeURIComponent(workflowChapterName.value.trim())}`;
+            }
+            const res = await fetch(url, { method: 'POST' });
+            await handleApiResponse(res);
+        } catch (e) {
+            alert(`辅助脚本执行异常: ${e.message}`);
         }
-        await fetch(url, { method: 'POST' });
         await pollTasks();
     };
 
@@ -366,7 +413,13 @@ export function useWorkflow(projectModule) {
             if (!workflowCharName.value.trim()) { alert("需指明目标角色名参数。"); return; }
             url += `&character=${encodeURIComponent(workflowCharName.value.trim())}`;
         }
-        await fetch(url, { method: 'POST' });
+        
+        try {
+            const res = await fetch(url, { method: 'POST' });
+            await handleApiResponse(res);
+        } catch (e) {
+            alert(`特征提取脚本执行异常: ${e.message}`);
+        }
         await pollTasks();
     };
 

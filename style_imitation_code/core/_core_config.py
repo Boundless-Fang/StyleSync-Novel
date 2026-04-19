@@ -1,30 +1,109 @@
-# --- File: core/_core_config.py ---
 import os
+from typing import Optional
+
 from dotenv import load_dotenv
 
-# 从项目根目录的新建文件中直接引入路径
 from paths_config import (
-    PROJECT_ROOT, 
-    CODE_DIR, 
-    REF_DIR, 
-    STYLE_DIR, 
-    PROJ_DIR, 
-    DICT_DIR, 
-    TEST_DIR
+    CODE_DIR,
+    DICT_DIR,
+    ENV_PATH,
+    HUGGINGFACE_CACHE_DIR,
+    PROJECT_ROOT,
+    PROJ_DIR,
+    REF_DIR,
+    STYLE_DIR,
+    TEST_DIR,
 )
 
-# 兼容旧代码的历史遗留命名习惯
+
 REFERENCE_DIR = REF_DIR
-BASE_DIR = os.path.dirname(os.path.abspath(__file__)) # 保留指向 core/ 的指针供老逻辑使用
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# 环境变量与模型下载镜像源设置
-os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-load_dotenv()
+DEFAULT_CHAT_MODEL = "deepseek-chat"
+DEFAULT_EMBEDDING_MODEL = "BAAI/bge-m3"
+DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+SILICONFLOW_EMBEDDING_URL = "https://api.siliconflow.cn/v1/embeddings"
+HF_ENDPOINT = "https://hf-mirror.com"
 
-# 统一向后兼容：允许通过别名配置向量服务密钥
-if not (os.environ.get("SILICONFLOW_API_KEY") or "").strip():
-    for alias in ("EMBEDDING_API_KEY", "SILICONFLOW_KEY", "SILICONFLOW_APIKEY"):
-        alias_val = (os.environ.get(alias) or "").strip()
-        if alias_val:
-            os.environ["SILICONFLOW_API_KEY"] = alias_val
-            break
+_ENV_LOADED = False
+_EMBEDDING_KEY_ALIASES = (
+    "SILICONFLOW_API_KEY",
+    "EMBEDDING_API_KEY",
+    "SILICONFLOW_KEY",
+    "SILICONFLOW_APIKEY",
+)
+
+
+def setup_runtime_environment() -> None:
+    os.environ.setdefault("HF_ENDPOINT", HF_ENDPOINT)
+    os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS", "1")
+    os.environ.setdefault("HUGGINGFACE_HUB_CACHE", HUGGINGFACE_CACHE_DIR)
+
+
+def load_project_env() -> None:
+    global _ENV_LOADED
+    if _ENV_LOADED:
+        return
+
+    setup_runtime_environment()
+    if os.path.exists(ENV_PATH):
+        load_dotenv(dotenv_path=ENV_PATH, override=False)
+
+    _normalize_embedding_api_key()
+    _ENV_LOADED = True
+
+
+def _normalize_embedding_api_key() -> None:
+    canonical = (os.environ.get("SILICONFLOW_API_KEY") or "").strip()
+    if canonical:
+        os.environ["SILICONFLOW_API_KEY"] = canonical
+        return
+
+    for alias in _EMBEDDING_KEY_ALIASES[1:]:
+        alias_value = (os.environ.get(alias) or "").strip()
+        if alias_value:
+            os.environ["SILICONFLOW_API_KEY"] = alias_value
+            return
+
+
+def get_env(name: str, default: Optional[str] = None, *, strip: bool = True) -> Optional[str]:
+    load_project_env()
+    value = os.environ.get(name, default)
+    if isinstance(value, str) and strip:
+        value = value.strip()
+    return value
+
+
+def get_required_env(name: str, *, message: Optional[str] = None) -> str:
+    value = get_env(name)
+    if value:
+        return value
+    raise ValueError(message or f"Missing required environment variable: {name}")
+
+
+def get_deepseek_api_key() -> str:
+    return get_required_env(
+        "DEEPSEEK_API_KEY",
+        message="Missing DEEPSEEK_API_KEY. Set it in the project .env file before running.",
+    )
+
+
+def get_embedding_api_key() -> str:
+    return get_required_env(
+        "SILICONFLOW_API_KEY",
+        message=(
+            "Missing SILICONFLOW_API_KEY. Set it in the project .env file before running. "
+            "Legacy aliases are still supported, but SILICONFLOW_API_KEY is recommended."
+        ),
+    )
+
+
+def get_default_chat_model() -> str:
+    return get_env("DEFAULT_CHAT_MODEL", DEFAULT_CHAT_MODEL) or DEFAULT_CHAT_MODEL
+
+
+def get_default_embedding_model() -> str:
+    return get_env("DEFAULT_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL) or DEFAULT_EMBEDDING_MODEL
+
+
+load_project_env()

@@ -1,16 +1,22 @@
-# --- File: api/config.py ---
-import os
-
-# 从项目根目录的新建文件中直接引入已计算好的绝对路径
-from paths_config import (
-    PROJECT_ROOT, 
-    CODE_DIR, 
-    REF_DIR, 
-    STYLE_DIR, 
-    PROJ_DIR, 
-    DICT_DIR, 
-    TEST_DIR
+from core._core_config import (
+    CODE_DIR,
+    DEFAULT_CHAT_MODEL,
+    DEFAULT_EMBEDDING_MODEL,
+    DEEPSEEK_BASE_URL,
+    DICT_DIR,
+    PROJECT_ROOT,
+    PROJ_DIR,
+    REF_DIR,
+    SILICONFLOW_EMBEDDING_URL,
+    STYLE_DIR,
+    TEST_DIR,
+    get_default_chat_model,
+    get_default_embedding_model,
+    get_deepseek_api_key,
+    get_embedding_api_key,
+    get_env,
+    load_project_env,
+    setup_runtime_environment,
 )
 
-# 【关键配置】：在导入模型库之前，强制设置 HuggingFace 国内镜像源环境
-os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+load_project_env()

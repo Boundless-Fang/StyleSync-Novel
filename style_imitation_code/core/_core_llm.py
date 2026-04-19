@@ -1,124 +1,199 @@
-import os 
-import json 
-import time 
-import requests 
-from dotenv import load_dotenv 
-  
-# 确保加载环境变量 
-load_dotenv() 
-  
-def call_deepseek_api(system_prompt, user_prompt, model="deepseek-chat", temperature=0.5, max_retries=3): 
-    """ 
-    统一封装的非流式 LLM 请求 (带指数退避重试机制) 
-    用于信息提取、设定补全、大纲生成等需要一次性返回完整结果的场景。 
-    """ 
-    api_key = os.getenv("DEEPSEEK_API_KEY") 
-    if not api_key: 
-        raise ValueError("error: 未能在环境变量中找到 DEEPSEEK_API_KEY") 
-  
-    headers = { 
-        "Content-Type": "application/json",  
-        "Authorization": f"Bearer {api_key}" 
-    } 
-     
-    payload = { 
-        "model": model, 
-        "messages": [ 
-            {"role": "system", "content": system_prompt}, 
-            {"role": "user", "content": user_prompt} 
-        ], 
-        "temperature": temperature, 
-        "stream": False 
-    } 
-     
-    for attempt in range(max_retries): 
-        try: 
-            response = requests.post( 
-                "https://api.deepseek.com/chat/completions",  
-                headers=headers,  
-                json=payload,  
-                timeout=(10, 600)  # 连接给 10秒，读取放宽到 600秒(10分钟)以防 R1 深度思考 
-            ) 
-            response.raise_for_status() 
-            data = response.json() 
-             
-            if 'usage' in data: 
-                total_tokens = data['usage'].get('total_tokens', 0) 
-                print(f"\nTotal Tokens: {total_tokens}", flush=True) 
-                 
-            return data['choices'][0]['message']['content'] 
-             
-        except requests.exceptions.RequestException as e: 
-            status_code = getattr(e.response, 'status_code', None) 
-            # 精准捕获限流与网关类异常进行退避重试 
-            if status_code in [429, 500, 502, 503, 504] and attempt < max_retries - 1: 
-                sleep_time = 2 ** attempt 
-                print(f"[WARN] API 请求触发限流或网关无响应 (状态码: {status_code})，{sleep_time} 秒后进行第 {attempt + 1} 次重试...", flush=True) 
-                time.sleep(sleep_time) 
-                continue 
-            raise RuntimeError(f"DeepSeek API 请求彻底失败 (已重试 {attempt} 次): {str(e)}") 
-  
-def stream_deepseek_api(system_prompt, user_prompt, model="deepseek-chat", temperature=0.5, max_retries=3): 
-    """ 
-    统一封装对大语言模型 API 的流式 (Streaming) HTTP 请求 (带握手期指数退避重试机制) 
-    返回生成器，专门用于 f5b 正文生成等需要实时打字机效果的场景。 
-    """ 
-    api_key = os.getenv("DEEPSEEK_API_KEY") 
-    if not api_key: 
-        raise ValueError("error: 未能在环境变量中找到 DEEPSEEK_API_KEY") 
-  
-    headers = { 
-        "Content-Type": "application/json",  
-        "Authorization": f"Bearer {api_key}" 
-    } 
-     
-    payload = { 
-        "model": model, 
-        "messages": [ 
-            {"role": "system", "content": system_prompt}, 
-            {"role": "user", "content": user_prompt} 
-        ], 
-        "temperature": temperature, 
-        "stream": True, 
-        "stream_options": {"include_usage": True}  
-    } 
-     
-    for attempt in range(max_retries): 
-        try: 
-            with requests.post( 
-                "https://api.deepseek.com/chat/completions",  
-                headers=headers,  
-                json=payload,  
-                stream=True,  
-                timeout=(10, 300)  
-            ) as response: 
-                response.raise_for_status() 
-                 
-                for line in response.iter_lines(): 
-                    if line: 
-                        decoded_line = line.decode('utf-8') 
-                        if decoded_line.startswith('data: ') and decoded_line != 'data: [DONE]': 
-                            try: 
-                                json_data = json.loads(decoded_line[6:]) 
-                                 
-                                if 'usage' in json_data and json_data['usage']: 
-                                    total_tokens = json_data['usage'].get('total_tokens', 0) 
-                                    print(f"\nTotal Tokens: {total_tokens}", flush=True) 
-                                    continue 
-                                     
-                                if 'choices' in json_data and len(json_data['choices']) > 0: 
-                                    delta_content = json_data['choices'][0]['delta'].get('content', '') 
-                                    if delta_content: 
-                                        yield delta_content  
-                            except json.JSONDecodeError: 
-                                continue 
-                return # 正常传输完毕，安全退出 
-                  
-        except requests.exceptions.RequestException as e: 
-            status_code = getattr(e.response, 'status_code', None) 
-            if status_code in [429, 500, 502, 503, 504] and attempt < max_retries - 1: 
-                sleep_time = 2 ** attempt 
-                print(f"\n[WARN] 流式 API 建连阶段异常 (状态码: {status_code})，{sleep_time} 秒后进行第 {attempt + 1} 次重试...", flush=True) 
-                time.sleep(sleep_time) 
-                continue 
-            raise RuntimeError(f"DeepSeek 流式 API 请求彻底失败: {str(e)}") 
+import json
+import threading
+import time
+
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+from core._core_config import DEEPSEEK_BASE_URL, get_deepseek_api_key, get_default_chat_model
+
+RETRYABLE_STATUS_CODES = (429, 500, 502, 503, 504)
+CHAT_CONNECT_TIMEOUT = 10
+CHAT_READ_TIMEOUT = 600
+CHAT_STREAM_READ_TIMEOUT = 300
+EMBEDDING_TIMEOUT = 120
+REQUEST_RETRY_COUNT = 3
+EMBEDDING_RETRY_COUNT = 5
+
+
+def _heartbeat_worker(stop_event, start_time):
+    """
+    Print a heartbeat periodically so long-running subprocess tasks are not
+    marked as stalled by the task watchdog.
+    """
+    while not stop_event.is_set():
+        for _ in range(60):
+            if stop_event.is_set():
+                return
+            time.sleep(1)
+
+        elapsed = int(time.time() - start_time)
+        print(
+            f"\n[INFO] Model call still running, please keep the network connection alive... "
+            f"(elapsed: {elapsed}s)",
+            flush=True,
+        )
+
+
+def _build_headers() -> dict:
+    api_key = get_deepseek_api_key()
+    return {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+
+
+def is_retryable_status(status_code) -> bool:
+    return status_code in RETRYABLE_STATUS_CODES
+
+
+def create_retry_session(total=EMBEDDING_RETRY_COUNT, backoff_factor=1.5) -> requests.Session:
+    session = requests.Session()
+    retry_strategy = Retry(
+        total=total,
+        backoff_factor=backoff_factor,
+        status_forcelist=list(RETRYABLE_STATUS_CODES),
+        allowed_methods=["POST"],
+    )
+    adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=10, pool_maxsize=10)
+    session.mount("https://", adapter)
+    return session
+
+
+def call_deepseek_api(
+    system_prompt,
+    user_prompt,
+    model=None,
+    temperature=0.5,
+    max_retries=REQUEST_RETRY_COUNT,
+):
+    """
+    Non-streaming LLM call used by scripts that need the full response at once.
+    """
+    payload = {
+        "model": model or get_default_chat_model(),
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": temperature,
+        "stream": False,
+    }
+
+    for attempt in range(max_retries):
+        stop_event = threading.Event()
+        start_time = time.time()
+        heartbeat_thread = threading.Thread(
+            target=_heartbeat_worker,
+            args=(stop_event, start_time),
+            daemon=True,
+        )
+        heartbeat_thread.start()
+
+        try:
+            response = requests.post(
+                f"{DEEPSEEK_BASE_URL}/chat/completions",
+                headers=_build_headers(),
+                json=payload,
+                timeout=(CHAT_CONNECT_TIMEOUT, CHAT_READ_TIMEOUT),
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            if "usage" in data:
+                total_tokens = data["usage"].get("total_tokens", 0)
+                print(f"\nTotal Tokens: {total_tokens}", flush=True)
+
+            return data["choices"][0]["message"]["content"]
+        except requests.exceptions.RequestException as exc:
+            status_code = getattr(exc.response, "status_code", None)
+            if is_retryable_status(status_code) and attempt < max_retries - 1:
+                sleep_time = 2 ** attempt
+                print(
+                    f"[WARN] LLM request failed with retryable status {status_code}; "
+                    f"retrying in {sleep_time}s...",
+                    flush=True,
+                )
+                time.sleep(sleep_time)
+                continue
+            raise RuntimeError(f"DeepSeek API request failed after retries: {exc}") from exc
+        finally:
+            stop_event.set()
+            heartbeat_thread.join(timeout=0.1)
+
+
+def stream_deepseek_api(
+    system_prompt,
+    user_prompt,
+    model=None,
+    temperature=0.5,
+    max_retries=REQUEST_RETRY_COUNT,
+):
+    """
+    Streaming LLM call used when incremental output is required.
+    """
+    payload = {
+        "model": model or get_default_chat_model(),
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": temperature,
+        "stream": True,
+        "stream_options": {"include_usage": True},
+    }
+
+    for attempt in range(max_retries):
+        try:
+            with requests.post(
+                f"{DEEPSEEK_BASE_URL}/chat/completions",
+                headers=_build_headers(),
+                json=payload,
+                stream=True,
+                timeout=(CHAT_CONNECT_TIMEOUT, CHAT_STREAM_READ_TIMEOUT),
+            ) as response:
+                response.raise_for_status()
+
+                event_data_buffer = []
+
+                for line in response.iter_lines():
+                    if line:
+                        decoded_line = line.decode("utf-8")
+                        if decoded_line.startswith("data: "):
+                            payload_str = decoded_line[6:]
+                            if payload_str == "[DONE]":
+                                break
+                            event_data_buffer.append(payload_str)
+                    elif event_data_buffer:
+                        full_event_str = "\n".join(event_data_buffer)
+                        event_data_buffer = []
+
+                        try:
+                            json_data = json.loads(full_event_str)
+
+                            if json_data.get("usage"):
+                                total_tokens = json_data["usage"].get("total_tokens", 0)
+                                print(f"\nTotal Tokens: {total_tokens}", flush=True)
+                                continue
+
+                            choices = json_data.get("choices") or []
+                            if choices:
+                                delta_content = choices[0]["delta"].get("content", "")
+                                if delta_content:
+                                    yield delta_content
+                        except json.JSONDecodeError:
+                            continue
+                return
+        except requests.exceptions.RequestException as exc:
+            status_code = getattr(exc.response, "status_code", None)
+            if is_retryable_status(status_code) and attempt < max_retries - 1:
+                sleep_time = 2 ** attempt
+                print(
+                    f"\n[WARN] Streaming LLM request failed with status {status_code}; "
+                    f"retrying in {sleep_time}s...",
+                    flush=True,
+                )
+                time.sleep(sleep_time)
+                continue
+            raise RuntimeError(f"DeepSeek streaming request failed after retries: {exc}") from exc

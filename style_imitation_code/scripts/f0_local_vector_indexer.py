@@ -10,7 +10,7 @@ from core._core_cli_runner import safe_run_app, inject_env, HeadlessBaseTask
 inject_env()
 
 from core._core_config import REFERENCE_DIR, STYLE_DIR
-from core._core_utils import smart_read_text, atomic_write
+from core._core_utils import smart_read_text, atomic_write, safe_faiss_read_index
 from core._core_rag import RAGRetriever
 
 class GlobalIndexerGUI(HeadlessBaseTask):
@@ -21,14 +21,18 @@ class GlobalIndexerGUI(HeadlessBaseTask):
         pass
 
     @staticmethod
-    def split_by_chapters_smart(text, threshold=3000):
-        """标准内存直通车切分算法"""
+    def split_by_chapters_smart(text, threshold=2000):
+        """
+        【核心重构：绝对边界熔断机制】
+        阈值严控在 2000 字以内。如果按章节切分后单章依然超标，
+        则强制打入 fallback_chunking 进行无尽切割，彻底杜绝 API 400 报错。
+        """
         pattern = r'\n(第[零一二三四五六七八九十百千万\d]+[章卷回节].*?)\n'
         matches = list(re.finditer(pattern, "\n" + text))
         
         chunks_metadata = []
         if not matches:
-            return GlobalIndexerGUI.fallback_chunking(text)
+            return GlobalIndexerGUI.fallback_chunking(text, max_len=threshold, overlap=200)
 
         for i in range(len(matches)):
             start_pos = matches[i].start()
@@ -38,66 +42,99 @@ class GlobalIndexerGUI(HeadlessBaseTask):
             chapter_content = text[start_pos:end_pos].strip()
             chapter_len = len(chapter_content)
 
-            if chapter_len < threshold:
+            if chapter_len <= threshold:
                 chunks_metadata.append({
                     "text": chapter_content,
                     "metadata": {"chapter": chapter_title, "index": i}
                 })
             else:
-                mid_point = chapter_len // 2
-                search_start = int(mid_point * 0.9)
-                split_idx = chapter_content.find('\n', search_start)
-                
-                if split_idx != -1 and split_idx < chapter_len * 0.9:
+                # 触发熔断：章节字数大于安全阈值，使用 fallback_chunking 强行粉碎
+                sub_chunks = GlobalIndexerGUI.fallback_chunking(chapter_content, max_len=threshold, overlap=200)
+                for part_idx, sub_item in enumerate(sub_chunks):
                     chunks_metadata.append({
-                        "text": chapter_content[:split_idx].strip(),
-                        "metadata": {"chapter": chapter_title, "index": i, "part": 1}
-                    })
-                    chunks_metadata.append({
-                        "text": chapter_content[split_idx:].strip(),
-                        "metadata": {"chapter": chapter_title, "index": i, "part": 2}
-                    })
-                else:
-                    chunks_metadata.append({
-                        "text": chapter_content,
-                        "metadata": {"chapter": chapter_title, "index": i}
+                        "text": sub_item["text"],
+                        "metadata": {
+                            "chapter": chapter_title,
+                            "index": i,
+                            "part": part_idx + 1
+                        }
                     })
         return chunks_metadata
 
     @staticmethod
-    def fallback_chunking(text, max_len=2000, overlap=300):
+    def fallback_chunking(text, max_len=2000, overlap=200):
         paragraphs = [p.strip() for p in text.split('\n') if p.strip()]
         chunks = []
         current_chunk = ""
         for p in paragraphs:
+            # 极端异常兜底：如果单段文字连换行都没有且超过最大阈值，执行无情物理切片
+            if len(p) > max_len:
+                if current_chunk: 
+                    chunks.append(current_chunk.strip())
+                    current_chunk = ""
+                for i in range(0, len(p), max_len - overlap):
+                    slice_text = p[i:i + max_len]
+                    if slice_text.strip():
+                        chunks.append(slice_text.strip())
+                continue
+
             if len(current_chunk) + len(p) <= max_len:
                 current_chunk += p + "\n"
             else:
                 if current_chunk: chunks.append(current_chunk.strip())
                 current_chunk = current_chunk[-overlap:] + p + "\n" if len(current_chunk) > overlap else p + "\n"
         if current_chunk: chunks.append(current_chunk.strip())
-        return [{"text": c, "metadata": {"chapter": "unknown"}} for c in chunks]
+        return [{"text": c, "metadata": {"chapter": "unknown"}} for c in chunks if c.strip()]
 
     @staticmethod
-    def read_blocks_stream(filepath, start_offset, block_size=3000):
-        """重载模式：流式增量字节读取生成器"""
-        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+    def stream_chapters_blocks(filepath, start_offset, block_size=1500000):
+        pattern = re.compile(r'^(第[零一二三四五六七八九十百千万\d]+[章卷回节].*?)$')
+        
+        encodings_to_try = ['utf-8', 'gb18030', 'utf-16']
+        target_encoding = 'utf-8'
+        for enc in encodings_to_try:
+            try:
+                with open(filepath, 'r', encoding=enc) as f:
+                    f.read(100)
+                target_encoding = enc
+                break
+            except UnicodeDecodeError:
+                continue
+
+        with open(filepath, 'r', encoding=target_encoding, errors='ignore') as f:
             f.seek(start_offset)
             buffer = ""
+            start_chap = "卷首/开篇"
+            current_chap = "卷首/开篇"
+
             while True:
+                current_pos = f.tell()
                 line = f.readline()
+                
                 if not line:
                     if buffer.strip():
-                        yield buffer.strip(), f.tell()
+                        yield buffer.strip(), current_pos, start_chap, current_chap
                     break
+
+                stripped_line = line.strip()
+                is_chapter = bool(pattern.match(stripped_line))
+
+                if is_chapter:
+                    if len(buffer) >= block_size:
+                        yield buffer.strip(), current_pos, start_chap, current_chap
+                        buffer = line
+                        start_chap = stripped_line
+                        current_chap = stripped_line
+                        continue
+                    else:
+                        current_chap = stripped_line
+                        if start_chap == "卷首/开篇":
+                            start_chap = stripped_line
+
                 buffer += line
-                if len(buffer) >= block_size:
-                    yield buffer.strip(), f.tell()
-                    buffer = ""
 
     @staticmethod
     def merge_index_parts(rag_db_dir, total_parts, log_func):
-        """重载模式：终态碎片合并组装"""
         log_func("[INFO] 正在将所有临时碎片组装为全局向量库...")
         all_chunks = []
         main_index = None
@@ -113,18 +150,14 @@ class GlobalIndexerGUI(HeadlessBaseTask):
                 part_chunks = json.load(f)
                 all_chunks.extend(part_chunks)
                 
-            part_index = faiss.read_index(idx_path)
+            part_index = safe_faiss_read_index(idx_path)
             if main_index is None:
-                # 深度克隆结构，防指针溢出
                 main_index = faiss.IndexFlatL2(part_index.d)
             
-            # 标准的 FAISS 平面索引合并，规避部分版本 merge_into 的 C++ 报错
-            # 由于每次仅将单 part_index 向量抽入内存，防 OOM
             vectors = np.zeros((part_index.ntotal, part_index.d), dtype=np.float32)
             part_index.reconstruct_n(0, part_index.ntotal, vectors)
             main_index.add(vectors)
             
-            # 及时释放局部大内存块
             del part_index
             del vectors
             gc.collect()
@@ -135,7 +168,6 @@ class GlobalIndexerGUI(HeadlessBaseTask):
         atomic_write(final_chunks_path, all_chunks, data_type='json')
         atomic_write(final_index_path, main_index, data_type='faiss')
         
-        # 清扫战场
         for p in range(1, total_parts + 1):
             try:
                 os.remove(os.path.join(rag_db_dir, f"part_{p}.index"))
@@ -174,17 +206,13 @@ class GlobalIndexerGUI(HeadlessBaseTask):
         rag_db_dir = os.path.join(style_dir, "global_rag_db")
         os.makedirs(rag_db_dir, exist_ok=True)
 
-        # 阶段一：文件体积嗅探与动静路由
         file_size = os.path.getsize(original_path)
         THRESHOLD_10MB = 10 * 1024 * 1024
 
         if file_size < THRESHOLD_10MB:
-            # ==========================================
-            # 内存直通车模式
-            # ==========================================
             log_func(f"[INFO] 文件尺寸 ({file_size/1024/1024:.2f} MB) < 10MB，触发内存直通车极速模式...")
             text = smart_read_text(original_path)
-            processed_chunks = GlobalIndexerGUI.split_by_chapters_smart(text)
+            processed_chunks = GlobalIndexerGUI.split_by_chapters_smart(text, threshold=2000)
             chunk_texts = [item["text"] for item in processed_chunks]
             
             retriever = RAGRetriever()
@@ -209,10 +237,7 @@ class GlobalIndexerGUI(HeadlessBaseTask):
             return True
             
         else:
-            # ==========================================
-            # 重载流式断点续传模式
-            # ==========================================
-            log_func(f"[WARN] 文件尺寸 ({file_size/1024/1024:.2f} MB) >= 10MB，为防止 OOM 崩溃，已切入重载流式微批次模式...")
+            log_func(f"[WARN] 文件尺寸 ({file_size/1024/1024:.2f} MB) >= 10MB，切入防 OOM 的流式语义切割微批次模式...")
             
             checkpoint_path = os.path.join(rag_db_dir, "checkpoint.json")
             start_offset = 0
@@ -224,76 +249,52 @@ class GlobalIndexerGUI(HeadlessBaseTask):
                         cp = json.load(f)
                         start_offset = cp.get("offset", 0)
                         current_part = cp.get("part", 1)
-                    log_func(f"[INFO] 检测到中断标记！将从游标位置 {start_offset} (文件分片 Part {current_part}) 处恢复处理，跳过已完成算力。")
+                    log_func(f"[INFO] 检测到中断标记！将从文件分片 Part {current_part} 处恢复处理，跳过已完成算力。")
                 except Exception:
                     pass
             
             retriever = RAGRetriever()
             embedder = retriever.get_embedder()
             
-            batch_texts = []
-            batch_metadata = []
-            last_offset = start_offset
-            
-            for block_text, offset in GlobalIndexerGUI.read_blocks_stream(original_path, start_offset):
-                batch_texts.append(block_text)
-                batch_metadata.append({
-                    "text": block_text,
-                    "metadata": {"chapter": f"Part {current_part}", "offset_marker": offset}
-                })
-                last_offset = offset
+            for block_text, offset, start_chap, end_chap in GlobalIndexerGUI.stream_chapters_blocks(original_path, start_offset, block_size=1500000):
+                log_func(f"\n=======================================================")
+                log_func(f">>> [阶段任务 {current_part}] 正在向量化: 【{start_chap}】 至 【{end_chap}】")
+                log_func(f"=======================================================")
+
+                processed_chunks = GlobalIndexerGUI.split_by_chapters_smart(block_text, threshold=2000)
+                batch_texts = [item["text"] for item in processed_chunks]
+                batch_metadata = [{"text": item["text"], "metadata": {"chapter": f"Part {current_part}", "offset_marker": offset}} for item in processed_chunks]
+
+                embeddings = embedder.encode(batch_texts, batch_size=8, show_progress_bar=True)
                 
-                # 达到 500 块执行强制微批次落盘与 GC 回收
-                if len(batch_texts) >= 500:
-                    log_func(f"-> 正在处理微批次 (Part {current_part})... 当前字节游标: {last_offset} / {file_size}")
-                    embeddings = embedder.encode(batch_texts, batch_size=8, show_progress_bar=False)
-                    
-                    dimension = embeddings.shape[1]
-                    part_index = faiss.IndexFlatL2(dimension)
-                    part_index.add(np.array(embeddings).astype('float32'))
-                    
-                    # 保存临时碎片
-                    faiss.write_index(part_index, os.path.join(rag_db_dir, f"part_{current_part}.index"))
-                    with open(os.path.join(rag_db_dir, f"chunks_part_{current_part}.json"), 'w', encoding='utf-8') as f:
-                        json.dump(batch_metadata, f, ensure_ascii=False, indent=2)
-                        
-                    # 更新断点标记
-                    current_part += 1
-                    with open(checkpoint_path, 'w', encoding='utf-8') as f:
-                        json.dump({"offset": last_offset, "part": current_part}, f)
-                        
-                    # 绝对清理内存引用并强制 OS 回收
-                    del embeddings
-                    del part_index
-                    del batch_texts
-                    del batch_metadata
-                    gc.collect()
-                    
-                    batch_texts = []
-                    batch_metadata = []
-            
-            # 处理尾部不足 500 的余数碎块
-            if batch_texts:
-                log_func(f"-> 正在处理尾部微批次 (Part {current_part})...")
-                embeddings = embedder.encode(batch_texts, batch_size=8, show_progress_bar=False)
                 dimension = embeddings.shape[1]
                 part_index = faiss.IndexFlatL2(dimension)
                 part_index.add(np.array(embeddings).astype('float32'))
                 
-                faiss.write_index(part_index, os.path.join(rag_db_dir, f"part_{current_part}.index"))
+                atomic_write(os.path.join(rag_db_dir, f"part_{current_part}.index"), part_index, data_type='faiss')
                 with open(os.path.join(rag_db_dir, f"chunks_part_{current_part}.json"), 'w', encoding='utf-8') as f:
                     json.dump(batch_metadata, f, ensure_ascii=False, indent=2)
                     
+                current_part += 1
+                with open(checkpoint_path, 'w', encoding='utf-8') as f:
+                    json.dump({"offset": offset, "part": current_part}, f)
+                    
                 del embeddings
                 del part_index
+                del batch_texts
+                del batch_metadata
+                del processed_chunks
                 gc.collect()
             
-            # 进入阶段四：碎片合并
-            GlobalIndexerGUI.merge_index_parts(rag_db_dir, current_part, log_func)
+            GlobalIndexerGUI.merge_index_parts(rag_db_dir, current_part - 1, log_func)
             return True
 
 def run_headless(target_file):
-    success = GlobalIndexerGUI.run_indexing(target_file)
+    if not os.path.exists(target_file):
+        print(f"[ERROR] 未找到目标文件: {target_file}")
+        sys.exit(1)
+        
+    success = GlobalIndexerGUI.run_indexing(target_file, log_func=lambda msg: print(msg, flush=True))
     if not success:
         sys.exit(1)
 

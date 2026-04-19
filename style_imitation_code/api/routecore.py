@@ -1,102 +1,142 @@
-import os
-import traceback
 import asyncio
+
 import requests
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.responses import StreamingResponse
 from openai import AsyncOpenAI
 from pydantic import BaseModel
+from core._core_llm import CHAT_STREAM_READ_TIMEOUT, EMBEDDING_TIMEOUT, REQUEST_RETRY_COUNT, create_retry_session
 
-from .config import CODE_DIR
+from .config import (
+    DEEPSEEK_BASE_URL,
+    SILICONFLOW_EMBEDDING_URL,
+    get_default_embedding_model,
+    get_embedding_api_key,
+)
 from .models import ChatRequest
 
 router = APIRouter()
 
-# =====================================================================
-# 全局常驻内存的 Embedding 模型服务生命周期与内部路由 (云端原生 HTTP 版)
-# =====================================================================
+
 class EmbedRequest(BaseModel):
     texts: list[str]
 
-# 全局限流信号量，保护主线程池不被第三方长耗时阻塞打穿
+
 embed_semaphore = asyncio.Semaphore(5)
+embed_session = create_retry_session()
 
-@router.post("/api/internal/embed")
-async def internal_embed(req: EmbedRequest):
-    """供本地子进程调用的内部向量化高速接口 (安全容错与异步隔离版)"""
-    
-    EMBEDDING_API_KEY = os.environ.get("SILICONFLOW_API_KEY")
-    if not EMBEDDING_API_KEY:
-        raise HTTPException(status_code=500, detail="【系统拦截】未配置硅基流动 API Key，拒绝请求。")
-        
-    EMBEDDING_BASE_URL = "https://api.siliconflow.cn/v1/embeddings"
-    
-    safe_texts = [t if t.strip() else " " for t in req.texts]
 
-    headers = {
-        "Authorization": f"Bearer {EMBEDDING_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    
-    payload = {
-        "model": "BAAI/bge-m3", 
-        "input": safe_texts
-    }
-    
-    async with embed_semaphore:
-        try:
-            # 通过 to_thread 将底层的同步阻塞 I/O 强制卸载至后台守护线程执行
-            response = await asyncio.to_thread(
-                requests.post, 
-                EMBEDDING_BASE_URL, 
-                headers=headers, 
-                json=payload, 
-                timeout=120
-            )
-            
-            if response.status_code != 200:
-                print(f"[ERROR] 硅基流动网关拒绝请求，状态码: {response.status_code}, 详情: {response.text}")
-                raise HTTPException(status_code=502, detail="上游模型服务提供商网关异常或拒绝响应")
-            
-            data = response.json()
-            embeddings = [item["embedding"] for item in data["data"]]
-            return {"embeddings": embeddings}
-            
-        except requests.exceptions.RequestException as re_exc:
-            print(f"[ERROR] 请求第三方向量服务发生网络底层异常: {re_exc}")
-            raise HTTPException(status_code=504, detail="请求上游模型服务网络超时或物理连接失败")
-        except KeyError as ke:
-            print(f"[ERROR] 第三方向量服务响应结构变动: 缺失键 {ke}")
-            raise HTTPException(status_code=500, detail="上游模型返回的数据结构发生未预期的变动")
+def _http_error(status_code: int, detail: str) -> HTTPException:
+    return HTTPException(status_code=status_code, detail=detail)
 
-# =====================================================================
 
-@router.post("/api/chat")
-async def chat_stream(req: ChatRequest):
-    client = AsyncOpenAI(api_key=req.api_key, base_url="https://api.deepseek.com")
+def _build_chat_messages(req: ChatRequest) -> list[dict]:
     messages = []
     if req.system_prompt:
         messages.append({"role": "system", "content": req.system_prompt})
-    messages.extend(req.messages)
+
+    for message in req.messages:
+        if message.role == "system":
+            continue
+        messages.append({"role": message.role, "content": message.content})
+
+    return messages
+
+
+def _map_llm_error(exc: Exception) -> HTTPException:
+    error_name = exc.__class__.__name__
+    detail = str(exc).strip() or "LLM request failed"
+
+    if error_name == "AuthenticationError":
+        return _http_error(401, f"LLM authentication failed: {detail}")
+    if error_name == "BadRequestError":
+        return _http_error(400, f"LLM request was rejected: {detail}")
+    if error_name == "RateLimitError":
+        return _http_error(429, "LLM rate limit reached, please retry later")
+    if error_name in {"APITimeoutError", "APIConnectionError"}:
+        return _http_error(504, "LLM upstream service timed out or is unreachable")
+    return _http_error(502, f"LLM upstream service error: {detail}")
+
+
+@router.post("/api/internal/embed")
+async def internal_embed(req: EmbedRequest):
+    try:
+        embedding_api_key = get_embedding_api_key()
+    except ValueError as exc:
+        raise _http_error(500, str(exc)) from exc
+
+    safe_texts = [text if text.strip() else " " for text in req.texts]
+
+    headers = {
+        "Authorization": f"Bearer {embedding_api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": get_default_embedding_model(),
+        "input": safe_texts,
+    }
+
+    async with embed_semaphore:
+        try:
+            response = await asyncio.to_thread(
+                embed_session.post,
+                SILICONFLOW_EMBEDDING_URL,
+                headers=headers,
+                json=payload,
+                timeout=EMBEDDING_TIMEOUT,
+            )
+
+            if response.status_code != 200:
+                print(
+                    f"[ERROR] Embedding request failed: {response.status_code} {response.text}"
+                )
+                raise _http_error(502, "Embedding upstream service rejected the request")
+
+            data = response.json()
+            embeddings = [item["embedding"] for item in data["data"]]
+            return {"embeddings": embeddings}
+        except requests.exceptions.RequestException as exc:
+            print(f"[ERROR] Embedding network error: {exc}")
+            raise _http_error(504, "Embedding upstream service timed out or is unreachable") from exc
+        except KeyError as exc:
+            print(f"[ERROR] Embedding response schema changed: missing key {exc}")
+            raise _http_error(502, "Embedding upstream response schema is invalid") from exc
+
+
+@router.post("/api/chat")
+async def chat_stream(req: ChatRequest):
+    client = AsyncOpenAI(
+        api_key=req.api_key,
+        base_url=DEEPSEEK_BASE_URL,
+        max_retries=REQUEST_RETRY_COUNT,
+        timeout=CHAT_STREAM_READ_TIMEOUT,
+    )
+    messages = _build_chat_messages(req)
+
+    try:
+        stream = await client.chat.completions.create(
+            model=req.model,
+            messages=messages,
+            stream=True,
+            temperature=req.temperature,
+            top_p=req.top_p,
+            stream_options={"include_usage": True},
+        )
+    except Exception as exc:
+        raise _map_llm_error(exc) from exc
 
     async def generate():
         try:
-            stream = await client.chat.completions.create(
-                model=req.model,
-                messages=messages,
-                stream=True,
-                temperature=req.temperature,
-                top_p=req.top_p,
-                stream_options={"include_usage": True} 
-            )
             async for chunk in stream:
                 if chunk.choices and len(chunk.choices) > 0 and chunk.choices[0].delta.content:
                     yield chunk.choices[0].delta.content
-                
-                if getattr(chunk, 'usage', None) and chunk.usage:
-                    yield f"__USAGE__:{chunk.usage.prompt_tokens},{chunk.usage.completion_tokens}__"
-                    
-        except Exception as e:
-            yield f"\n\n[系统请求错误: {str(e)}]"
+
+                if getattr(chunk, "usage", None) and chunk.usage:
+                    yield (
+                        f"__USAGE__:{chunk.usage.prompt_tokens},"
+                        f"{chunk.usage.completion_tokens}__"
+                    )
+        except Exception:
+            yield "\n\n[STREAM_ERROR] Upstream stream interrupted, please retry."
 
     return StreamingResponse(generate(), media_type="text/plain")
