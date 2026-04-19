@@ -13,7 +13,7 @@ from core._core_cli_runner import safe_run_app, inject_env, HeadlessBaseTask
 inject_env()
 
 from core._core_config import REFERENCE_DIR, STYLE_DIR, PROJ_DIR
-from core._core_utils import smart_read_text, atomic_write
+from core._core_utils import smart_read_text, atomic_write, safe_faiss_read_index
 from core._core_rag import RAGRetriever
 
 class LocalPlotCompressionApp(HeadlessBaseTask):
@@ -56,7 +56,6 @@ class LocalPlotCompressionApp(HeadlessBaseTask):
 
     @staticmethod
     def split_by_chapters(text, max_len=10000):
-        """内存直通车全量切分"""
         pattern = r'\n(第[零一二三四五六七八九十百千万\d]+[章卷回节].*?)\n'
         segments = re.split(pattern, "\n" + text)
         
@@ -100,9 +99,21 @@ class LocalPlotCompressionApp(HeadlessBaseTask):
 
     @staticmethod
     def stream_chapters_blocks(filepath, start_offset, block_size=10000):
-        """重载模式：流式章节拼接与缓冲弹出生成器"""
         pattern = re.compile(r'^(第[零一二三四五六七八九十百千万\d]+[章卷回节].*?)$')
-        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+        
+        # 完美套用 core_utils 中的多编码自适应探测逻辑
+        encodings_to_try = ['utf-8', 'gb18030', 'utf-16']
+        target_encoding = 'utf-8'
+        for enc in encodings_to_try:
+            try:
+                with open(filepath, 'r', encoding=enc) as f:
+                    f.read(100)
+                target_encoding = enc
+                break
+            except UnicodeDecodeError:
+                continue
+
+        with open(filepath, 'r', encoding=target_encoding, errors='ignore') as f:
             f.seek(start_offset)
             buffer = ""
             titles = []
@@ -120,7 +131,6 @@ class LocalPlotCompressionApp(HeadlessBaseTask):
                     
                 buffer += line
                 
-                # 触达字节上限，切片弹出并记录精准游标
                 if len(buffer) >= block_size:
                     yield {"titles": titles if titles else ["合并片段"], "text": buffer.strip()}, f.tell()
                     buffer = ""
@@ -128,14 +138,12 @@ class LocalPlotCompressionApp(HeadlessBaseTask):
 
     @staticmethod
     def merge_compression_parts(rag_db_dir, outline_path, total_parts, log_func):
-        """重载模式：合并摘要索引库及 Markdown 大纲"""
         log_func("[INFO] 正在将所有分卷压缩索引与大纲碎片合并...")
         all_mapping = []
         main_index = None
         outline_content = ["# 核心事件与实体分布大纲 (重载流式合成版)\n"]
 
         for p in range(1, total_parts + 1):
-            # 处理索引与映射表
             idx_path = os.path.join(rag_db_dir, f"part_{p}.index")
             map_path = os.path.join(rag_db_dir, f"map_part_{p}.json")
             out_path = os.path.join(rag_db_dir, f"outline_part_{p}.md")
@@ -147,7 +155,7 @@ class LocalPlotCompressionApp(HeadlessBaseTask):
                 part_map = json.load(f)
                 all_mapping.extend(part_map)
                 
-            part_index = faiss.read_index(idx_path)
+            part_index = safe_faiss_read_index(idx_path)
             if main_index is None:
                 main_index = faiss.IndexFlatL2(part_index.d)
                 
@@ -155,7 +163,6 @@ class LocalPlotCompressionApp(HeadlessBaseTask):
             part_index.reconstruct_n(0, part_index.ntotal, vectors)
             main_index.add(vectors)
             
-            # 处理 Markdown 大纲拼接
             if os.path.exists(out_path):
                 with open(out_path, 'r', encoding='utf-8') as f:
                     outline_content.append(f.read())
@@ -164,7 +171,6 @@ class LocalPlotCompressionApp(HeadlessBaseTask):
             del vectors
             gc.collect()
 
-        # 重新排序重写全局映射表 ID，确保统一
         for i, item in enumerate(all_mapping):
             item["id"] = i
 
@@ -172,7 +178,6 @@ class LocalPlotCompressionApp(HeadlessBaseTask):
         atomic_write(os.path.join(rag_db_dir, "plot_summary.index"), main_index, data_type='faiss')
         atomic_write(outline_path, "\n".join(outline_content), data_type='text')
         
-        # 物理清扫战场碎片
         for p in range(1, total_parts + 1):
             for suffix in [".index", ".json", ".md"]:
                 try: os.remove(os.path.join(rag_db_dir, f"part_{p}{suffix}" if suffix == ".index" else (f"map_part_{p}.json" if suffix == ".json" else f"outline_part_{p}.md")))
@@ -203,6 +208,12 @@ class LocalPlotCompressionApp(HeadlessBaseTask):
             project_dir = os.path.join(PROJ_DIR, project_name)
             os.makedirs(project_dir, exist_ok=True)
 
+        try:
+            full_text = smart_read_text(original_path)
+        except Exception as e:
+            log_func(f"❌ 读取原文失败: {e}")
+            return False
+
         global_vocab = LocalPlotCompressionApp.load_global_vocab(vocab_path)
         if not global_vocab:
             log_func("[WARN] 警告：未发现 f3a 专属词库，将完全依赖 Jieba 提取本章实体。")
@@ -211,11 +222,7 @@ class LocalPlotCompressionApp(HeadlessBaseTask):
         THRESHOLD_10MB = 10 * 1024 * 1024
 
         if file_size < THRESHOLD_10MB:
-            # ==========================================
-            # 内存直通车模式
-            # ==========================================
             log_func(f"[INFO] 文本 ({file_size/1024/1024:.2f} MB) 触发高速直通车模式...")
-            full_text = smart_read_text(original_path)
             chunks_data = LocalPlotCompressionApp.split_by_chapters(full_text, max_len=chunk_size)
             
             summaries = []
@@ -257,9 +264,6 @@ class LocalPlotCompressionApp(HeadlessBaseTask):
             atomic_write(mapping_path, mapping_data, data_type='json')
             
         else:
-            # ==========================================
-            # 重载流式断点续传模式
-            # ==========================================
             log_func(f"[WARN] 文本超过 10MB，切入防 OOM 流式提取构建模式...")
             checkpoint_path = os.path.join(rag_db_dir, "checkpoint.json")
             start_offset = 0
@@ -303,7 +307,6 @@ class LocalPlotCompressionApp(HeadlessBaseTask):
                 global_chunk_idx += 1
                 last_offset = offset
                 
-                # 满 500 块执行强制内存释放与局部落盘
                 if len(batch_summaries) >= 500:
                     log_func(f"-> 正在压缩局部大纲卷宗 (Part {current_part})...")
                     embeddings = embedder.encode(batch_summaries, batch_size=8, show_progress_bar=False)
@@ -312,7 +315,7 @@ class LocalPlotCompressionApp(HeadlessBaseTask):
                     part_index = faiss.IndexFlatL2(dimension)
                     part_index.add(np.array(embeddings).astype('float32'))
                     
-                    faiss.write_index(part_index, os.path.join(rag_db_dir, f"part_{current_part}.index"))
+                    atomic_write(os.path.join(rag_db_dir, f"part_{current_part}.index"), part_index, data_type='faiss')
                     with open(os.path.join(rag_db_dir, f"map_part_{current_part}.json"), 'w', encoding='utf-8') as f:
                         json.dump(batch_mapping, f, ensure_ascii=False, indent=2)
                     with open(os.path.join(rag_db_dir, f"outline_part_{current_part}.md"), 'w', encoding='utf-8') as f:
@@ -333,14 +336,13 @@ class LocalPlotCompressionApp(HeadlessBaseTask):
                     batch_mapping = []
                     batch_outline = []
 
-            # 尾部余数处理
             if batch_summaries:
                 embeddings = embedder.encode(batch_summaries, batch_size=8, show_progress_bar=False)
                 dimension = embeddings.shape[1]
                 part_index = faiss.IndexFlatL2(dimension)
                 part_index.add(np.array(embeddings).astype('float32'))
                 
-                faiss.write_index(part_index, os.path.join(rag_db_dir, f"part_{current_part}.index"))
+                atomic_write(os.path.join(rag_db_dir, f"part_{current_part}.index"), part_index, data_type='faiss')
                 with open(os.path.join(rag_db_dir, f"map_part_{current_part}.json"), 'w', encoding='utf-8') as f:
                     json.dump(batch_mapping, f, ensure_ascii=False, indent=2)
                 with open(os.path.join(rag_db_dir, f"outline_part_{current_part}.md"), 'w', encoding='utf-8') as f:
@@ -350,10 +352,8 @@ class LocalPlotCompressionApp(HeadlessBaseTask):
                 del part_index
                 gc.collect()
 
-            # 阶段四执行组装
             LocalPlotCompressionApp.merge_compression_parts(rag_db_dir, outline_path, current_part, log_func)
 
-        # 统一执行双重分发：将编译好的大纲与检索库同步至指定的工程目录下
         msg = f"[INFO] 结构压缩与检索库全链完备。\n文件已落盘至: {style_dir}"
         if project_dir:
             p_outline = os.path.join(project_dir, "plot_outlines.md")

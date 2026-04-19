@@ -172,7 +172,11 @@ class ChapterOutlineApp(HeadlessBaseTask):
 
 def run_headless(project_name, chapter_name, chapter_brief_json, model="deepseek-chat"):
     import sys
+    import base64
     try:
+        # 【核心修复】：拦截 Base64 前缀并安全解码
+        if chapter_brief_json.startswith("b64:"):
+            chapter_brief_json = base64.b64decode(chapter_brief_json[4:]).decode('utf-8')
         data = json.loads(chapter_brief_json)
         chapter_brief = data.get("brief", "")
     except Exception:

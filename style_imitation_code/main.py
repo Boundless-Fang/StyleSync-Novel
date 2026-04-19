@@ -1,27 +1,17 @@
 import os
 import socket
-from dotenv import load_dotenv
-
-# 加载 .env 文件
-load_dotenv()
-
-# 【必须放在最前面】：在导入任何第三方库之前，强行设置全局镜像源！
-os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-
-# 针对 Windows 强制禁用软链接，解决 WinError 14007 错误
-os.environ["HF_HUB_DISABLE_SYMLINKS"] = "1"
-
-# 预设模型缓存路径，有时能绕过权限问题
-os.environ["HUGGINGFACE_HUB_CACHE"] = r"D:\StyleSync-Novel\huggingface\hub"
 
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from api import router
 from api.config import CODE_DIR
+from core._core_config import load_project_env
+
+load_project_env()
 
 app = FastAPI(title="DeepSeek Ultimate Pro + Writer")
 
@@ -33,38 +23,34 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 挂载全部路由
 app.include_router(router)
-
-# ================= 核心修改区 =================
-
-# 1. 静态资源（js, css）必须移到 /static 路径下
 app.mount("/static", StaticFiles(directory=os.path.join(CODE_DIR, "frontend")), name="static")
 
-# 【变更】：废弃 Jinja2，直接以纯静态文件形式返回 HTML，彻底切断与 Vue {{ }} 语法的冲突
+
 @app.get("/")
 async def serve_frontend():
     html_path = os.path.join(CODE_DIR, "frontend", "index.html")
     return FileResponse(html_path)
 
-# ==============================================
 
 @app.on_event("startup")
 async def startup_event():
-    print("\n" + "="*60)
-    print("[系统通知] Web 服务及底层通信引擎已启动")
-    print("[界面访问] 请在浏览器中点击或输入以下地址访问工作台：")
-    print(" 👉 本机访问: http://127.0.0.1:8000")
-    
+    print("\n" + "=" * 60)
+    print("[System] Web service started successfully.")
+    print("[Access] Open the app in your browser:")
+    print(" -> Local: http://127.0.0.1:8000")
+
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        lan_ip = s.getsockname()[0]
-        s.close()
-        print(f" 👉 局域网访问: http://{lan_ip}:8000")
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.connect(("8.8.8.8", 80))
+        lan_ip = sock.getsockname()[0]
+        sock.close()
+        print(f" -> LAN: http://{lan_ip}:8000")
     except Exception:
         pass
-    print("="*60 + "\n")
+
+    print("=" * 60 + "\n")
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

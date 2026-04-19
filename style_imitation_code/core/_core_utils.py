@@ -10,27 +10,18 @@ import asyncio
 import time
 import random
 
-# 动态获取系统临时目录构建独立沙箱
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SANDBOX_DIR = os.path.join(tempfile.gettempdir(), "style_sync_sandbox")
 os.makedirs(SANDBOX_DIR, exist_ok=True)
 
 def mask_sensitive_info(error_msg: str) -> str:
-    """异常拦截器：脱敏报错堆栈中的服务器真实绝对路径与高危鉴权凭证。"""
     msg = str(error_msg)
-    
-    # 1. 物理环境脱敏：拦截绝对工作区与沙箱路径
     msg = msg.replace(PROJECT_ROOT, "[SERVER_WORKSPACE]")
     msg = msg.replace(SANDBOX_DIR, "[SECURE_SANDBOX]")
-    
-    # 2. 泛化兜底：屏蔽常见的盘符绝对路径暴露
     msg = re.sub(r'[A-Za-z]:\\[^\s"\'<>]+', '[LOCAL_PATH]', msg)
     msg = re.sub(r'/(?:tmp|usr|opt|var|home|etc)/[^\s"\'<>]+', '[LOCAL_PATH]', msg)
-    
-    # 3. 鉴权资产脱敏：基于高危特征库的正则深度清洗
     msg = re.sub(r'sk-[a-zA-Z0-9]{20,}', '[REDACTED_API_KEY]', msg)
     msg = re.sub(r'Bearer\s+[a-zA-Z0-9\-\.\_]{20,}', 'Bearer [REDACTED_TOKEN]', msg)
-    
     return msg
 
 def validate_safe_param(param: str) -> str:
@@ -38,55 +29,44 @@ def validate_safe_param(param: str) -> str:
     if not param: 
         return param
     param = str(param).strip()
-    if param.startswith("-"): 
-        raise ValueError("安全拦截：参数禁止以连字符开头")
-    # 仅允许中英数、下划线、减号、括号、空格、逗号与点号
-    if not re.match(r'^[\w\-\s\u4e00-\u9fa5\(\)（），,\.]+$', param):
-        raise ValueError("安全拦截：参数包含非法特殊字符")
+    
+    # 【修复1】：不再拦截 startswith("-")，防止误杀 Markdown 列表符号
+    # 【修复2】：将 *、•、~ 等可能附带的 Markdown 标记加入白名单放行
+    if not re.match(r'^[\w\-\s\u4e00-\u9fa5\(\)（），,\.、:：/\[\]\+\*•~]+$', param):
+        raise ValueError(f"安全拦截：参数 [{param}] 包含非法特殊字符")
     return param
 
 def create_sandbox_ticket(source_file_path: str) -> str:
-    """生成一次性安全票据，并将源文件安全投递至沙箱。"""
     if not source_file_path or not os.path.exists(source_file_path):
         return ""
-    
     ticket_id = f"TKT-{uuid.uuid4().hex}"
     ext = os.path.splitext(source_file_path)[1] or ".txt"
     sandbox_path = os.path.join(SANDBOX_DIR, f"{ticket_id}{ext}")
-    
     try:
         os.link(source_file_path, sandbox_path)
     except OSError:
         shutil.copy2(source_file_path, sandbox_path)
-        
     return ticket_id
 
 def resolve_sandbox_ticket(ticket_id: str) -> str:
-    """逆向解析票据，仅允许检索限定在沙箱内部的文件。"""
     ticket_base = os.path.splitext(os.path.basename(ticket_id))[0]
-    
     if not ticket_base.startswith("TKT-") or not re.match(r'^TKT-[a-f0-9]{32}$', ticket_base):
         raise ValueError("非法的票据标识符")
-        
     matches = glob.glob(os.path.join(SANDBOX_DIR, f"{ticket_base}.*"))
     if not matches:
         raise FileNotFoundError("票据生命周期已结束或文件不存在")
-        
     safe_target = os.path.normcase(os.path.realpath(os.path.abspath(matches[0])))
     safe_base = os.path.normcase(os.path.realpath(os.path.abspath(SANDBOX_DIR)))
     if os.path.commonpath([safe_base, safe_target]) != safe_base:
         raise PermissionError("沙箱越权读取拦截")
-        
     return safe_target
 
 def cleanup_sandbox_ticket(ticket_id: str):
-    """清理指定票据在沙箱中产生的所有物理碎片。"""
     if not ticket_id: 
         return
     ticket_base = os.path.splitext(os.path.basename(ticket_id))[0]
     if not ticket_base.startswith("TKT-"): 
         return
-        
     matches = glob.glob(os.path.join(SANDBOX_DIR, f"{ticket_base}.*"))
     for match in matches:
         try:
@@ -94,8 +74,19 @@ def cleanup_sandbox_ticket(ticket_id: str):
         except OSError:
             pass
 
+def safe_faiss_read_index(index_path: str):
+    import faiss
+    import numpy as np
+    if not os.path.exists(index_path):
+        raise FileNotFoundError(f"FAISS 索引文件不存在: {index_path}")
+    try:
+        with open(index_path, "rb") as f:
+            data = f.read()
+        return faiss.deserialize_index(np.frombuffer(data, dtype=np.uint8))
+    except Exception as e:
+        raise RuntimeError(f"FAISS 索引底层反序列化失败: {str(e)}")
+
 def smart_read_text(file_path, max_len=None):
-    """智能读取中文小说，防止崩溃。"""
     basename = os.path.basename(file_path)
     if basename.startswith("TKT-"):
         try:
@@ -105,7 +96,6 @@ def smart_read_text(file_path, max_len=None):
 
     encodings_to_try = ['utf-8', 'gb18030', 'utf-16']
     text = None
-    
     for enc in encodings_to_try:
         try:
             with open(file_path, 'r', encoding=enc) as f:
@@ -117,23 +107,17 @@ def smart_read_text(file_path, max_len=None):
     try:
         with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
             text = f.read(max_len) if max_len else f.read()
-            
         sample = text[:1000]
         chinese_chars = re.findall(r'[\u4e00-\u9fa5，。！？“”]', sample)
-        
         if len(sample) > 100 and (len(chinese_chars) / len(sample)) < 0.2:
             raise ValueError("文件读取后汉字密度过低，判定为乱码或格式损坏，已拦截。")
-            
-        print("[WARN] 警告：文件存在非法字节，已强行修复并清理乱码碎片。")
         return text
-        
     except (OSError, ValueError) as e:
         error_msg = f"文件解析彻底失败: {mask_sensitive_info(str(e))}"
         print(f"[ERROR] {error_msg}")
         raise RuntimeError(error_msg)
 
 def smart_yield_text(file_path: str, chunk_size: int = 8192, high_water_mark: int = 1048576):
-    """带高水位线保护的自然段动态缓冲流式读取器。"""
     basename = os.path.basename(file_path)
     if basename.startswith("TKT-"):
         try:
@@ -185,7 +169,6 @@ def smart_yield_text(file_path: str, chunk_size: int = 8192, high_water_mark: in
         raise RuntimeError(error_msg)
 
 def resolve_sandbox_path(base_dir: str, user_input_path: str, allowed_extensions=('.txt', '.md')) -> str:
-    """基础目录守卫：将外部输入安全的限制在指定根目录内。"""
     if not user_input_path:
         raise ValueError("输入路径不能为空")
     user_input_path = str(user_input_path).strip()
@@ -208,30 +191,25 @@ def resolve_sandbox_path(base_dir: str, user_input_path: str, allowed_extensions
     return safe_target
 
 def atomic_write(target_path: str, data, data_type: str = 'text'):
-    """
-    全局通用原子写入器 (Atomic Writer)
-    采用本地重试与备份降级机制，契合单机桌面端 Fail-Fast 原则。
-    """
     dirname = os.path.dirname(target_path)
     if dirname:
         os.makedirs(dirname, exist_ok=True)
         
-    # 1. 临时态隔离：生成带 UUID 的独立临时文件
     temp_path = f"{target_path}.{uuid.uuid4().hex}.tmp"
     
     try:
-        # 2. 针对不同类型执行写入
         if data_type == 'json':
             with open(temp_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
         elif data_type == 'faiss':
             import faiss
-            faiss.write_index(data, temp_path)
-        else:  # 'text'
+            chunk = faiss.serialize_index(data)
+            with open(temp_path, 'wb') as f:
+                f.write(chunk)
+        else:  
             with open(temp_path, 'w', encoding='utf-8') as f:
                 f.write(str(data))
                 
-        # 3. 适度的防惊群退避机制 (针对本地杀毒软件或短暂占用)
         max_retries = 10     
         base_delay = 0.2     
         max_delay = 3.0      
@@ -242,21 +220,18 @@ def atomic_write(target_path: str, data, data_type: str = 'text'):
                 return True
             except PermissionError as e:
                 if attempt < max_retries - 1:
-                    # 带封顶的温和指数退避 + 随机抖动
                     sleep_time = min(max_delay, base_delay * (1.5 ** attempt)) + random.uniform(0, 0.1)
                     time.sleep(sleep_time)
                     continue
                 else:
-                    # 4. 核心避险：超越重试上限后，保留孤儿临时文件作为备份，保障 AI 算力不白费
                     backup_path = f"{target_path}.backup-{int(time.time())}.txt"
                     try:
-                        os.replace(temp_path, backup_path)
-                        raise RuntimeError(f"目标文件被其它软件死死锁定，无法覆写。为防数据丢失，已为您生成紧急备份: {backup_path}")
+                        shutil.move(temp_path, backup_path) 
+                        raise RuntimeError(f"目标文件被其它软件死死锁定，无法覆写。为防数据丢失，已生成紧急备份: {backup_path}")
                     except OSError:
-                        raise RuntimeError(f"文件锁定且重命名失败。AI 辛苦生成的数据已保留在临时文件中: {temp_path}")
+                        raise RuntimeError(f"文件锁定且重命名失败。生成的数据已物理保留在临时文件中: {temp_path}")
                     
     except Exception as e:
-        # 5. 事务回滚：只有在非锁死错误（如磁盘满、JSON序列化错误）时，才清理产生的物理碎片
         if not isinstance(e, RuntimeError) or ("紧急备份" not in str(e) and "临时文件保留" not in str(e)):
             if os.path.exists(temp_path):
                 try:
@@ -266,12 +241,10 @@ def atomic_write(target_path: str, data, data_type: str = 'text'):
         raise RuntimeError(f"原子写入事务失败，详情: {str(e)}")
 
 class AsyncFileLockManager:
-    """全局单例：文件级细粒度异步锁状态机（支持安全回收）"""
     _locks = {}
     _dict_lock = asyncio.Lock()
 
 class async_file_lock:
-    """生产级文件读写异步互斥锁（带用毕清理机制）"""
     def __init__(self, file_path: str):
         if not file_path:
             raise ValueError("系统拦截：文件路径不能为空")
@@ -288,23 +261,19 @@ class async_file_lock:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         self.lock.release()
-        # 极简清理机制：如果这把锁被释放后，没有其他协程在排队等待它，就从字典中移除，防止内存泄漏
         async with AsyncFileLockManager._dict_lock:
             if not self.lock.locked() and self.norm_path in AsyncFileLockManager._locks:
                 del AsyncFileLockManager._locks[self.norm_path]
 
 async def async_smart_read_text(file_path: str, max_len: int = None) -> str:
-    """带有独立文件级互斥锁的异步读取，绝不阻塞全局"""
     async with async_file_lock(file_path):
         return await asyncio.to_thread(smart_read_text, file_path, max_len)
 
 async def async_atomic_write(target_path: str, data, data_type: str = 'text') -> bool:
-    """带有独立文件级互斥锁的异步写入，绝不阻塞全局"""
     async with async_file_lock(target_path):
         return await asyncio.to_thread(atomic_write, target_path, data, data_type)
 
 async def async_append_text(target_path: str, content: str) -> bool:
-    """带有独立文件级互斥锁的异步追加，绝不阻塞全局"""
     def _append():
         with open(target_path, "a", encoding="utf-8") as f:
             f.write(content)
