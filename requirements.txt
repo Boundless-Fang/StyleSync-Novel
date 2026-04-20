@@ -9,3 +9,4 @@ requests
 pydantic
 openai
 python-multipart
+pytest

@@ -4,31 +4,32 @@
 
 ## 项目定位
 
-StyleSync-Novel 不是一个已经商业化部署的平台，而是一个可本地运行的 MVP 原型。它主要解决长文本创作中三个高频问题：
-
-- 角色设定容易漂移
-- 长篇连载时上下文容易遗忘
-- 多次续写后文风不稳定
-
-当前项目更适合作为：
+StyleSync-Novel 不是一个已经商业化部署的在线平台，而是一个本地可运行的 MVP 原型。  
+它更适合作为：
 
 - AI 写作产品原型
 - 本地可测试的创作辅助工具
 - AI 产品经理方向的作品集项目
 
+当前项目重点解决三个高频问题：
+
+- 角色设定容易漂移
+- 长篇续写时上下文容易遗忘
+- 多轮生成后文风不稳定
+
 ## 适用用户
 
 - 小说原作者：希望在控制成本的前提下做连载续写和内容补全
-- 同人创作者：希望在保留原著风格和设定的前提下生成衍生内容
+- 同人创作者：希望在保留原著设定和风格的前提下生成衍生内容
 
 ## 核心能力
 
 - 参考文本风格分析：提取叙事节奏、句段结构、词汇偏好、修辞倾向
 - 世界观与角色设定抽取：生成结构化世界观和角色信息卡
-- 分层 RAG 检索：通过摘要到正文映射，提升长文本上下文召回效率
+- 分层 RAG 检索：通过摘要到正文映射提升长文本上下文召回效率
 - 章节大纲生成：根据剧情简述与设定动态生成详细大纲
 - 正文流式生成：支持基于前文上下文的章节续写
-- 文本校验与后续扩展：预留剧情推演和事实一致性校验能力
+- 文本校验与后续扩展：预留剧情推演和一致性校验能力
 
 ## 技术方案概览
 
@@ -51,11 +52,9 @@ StyleSync-Novel/
 │   ├── frontend/
 │   ├── scripts/
 │   └── main.py
-├── reference_novels/
-├── text_style_imitation/
-├── novel_projects/
+├── docs/
 ├── dictionaries/
-├── text_testing_code/
+├── tests/
 ├── requirements.txt
 └── README.md
 ```
@@ -63,9 +62,16 @@ StyleSync-Novel/
 说明：
 
 - `style_imitation_code/`：核心代码
-- `reference_novels/`：参考文本输入目录
-- `text_style_imitation/`：风格特征与全局 RAG 数据
-- `novel_projects/`：具体创作项目目录
+- `docs/`：技术文档
+- `tests/`：接口测试与本地测试 GUI
+- `dictionaries/`：词库与预留配置目录
+
+以下目录属于运行期数据，不建议上传到公开仓库：
+
+- `reference_novels/`
+- `text_style_imitation/`
+- `novel_projects/`
+- `text_testing_code/`
 
 ## 快速开始
 
@@ -93,7 +99,17 @@ pip install -r requirements.txt
 
 ### 2. 配置 `.env`
 
-在项目根目录创建 `.env` 文件，至少包含：
+项目根目录已提供可公开上传的配置模板：[.env.example](/D:/StyleSync-Novel/.env.example)。
+
+建议先复制一份：
+
+```powershell
+Copy-Item .env.example .env
+```
+
+然后再填写你自己的真实密钥。`.env` 不应上传到 GitHub。
+
+至少包含：
 
 ```env
 DEEPSEEK_API_KEY=your_deepseek_key
@@ -117,6 +133,43 @@ python style_imitation_code/main.py
 
 - 本地地址：`http://127.0.0.1:8000`
 
+## 测试
+
+项目当前提供两种测试方式：
+
+### 1. 命令行运行 `pytest`
+
+```powershell
+pytest tests
+```
+
+当前已补充的测试文件：
+
+- `tests/test_chat_api.py`
+- `tests/test_workflow_api.py`
+- `tests/test_project_api.py`
+
+这些测试主要验证：
+
+- 接口参数校验是否生效
+- 任务接口返回结构是否稳定
+- 项目创建、章节读写等基础行为是否正常
+
+### 2. 本地图形界面测试面板
+
+为了避免逐个手动运行测试文件，项目提供了一个轻量 GUI：
+
+```powershell
+python tests/0_test_runner_gui.py
+```
+
+功能包括：
+
+- 勾选运行指定测试文件
+- 一键运行全部测试
+- 查看测试输出
+- 中途终止当前测试
+
 ## 当前实现状态
 
 已完成的主流程：
@@ -125,6 +178,7 @@ python style_imitation_code/main.py
 - 关键词库、世界观、角色信息抽取
 - 分层 RAG 检索库构建
 - 大纲生成与正文流式生成
+- 任务终止能力：支持“终止最近任务”和“终止全部任务”
 
 规划中的下一阶段能力：
 
@@ -138,18 +192,29 @@ python style_imitation_code/main.py
 - 当前主要面向本地运行，不是线上托管产品
 - 超长文本处理仍受本地算力和 API 窗口限制影响
 - 生成质量仍依赖参考文本质量、提示词设计与召回效果
+- 测试仍以接口层和最小回归为主，尚未覆盖完整端到端生成链路
 
-## 项目价值
+## 仓库说明
 
-这个项目的重点不只是“调用了大模型”，而是尝试把小说创作中真实存在的问题拆成一条完整工作流：
+这个仓库更适合公开展示“代码、文档、测试骨架和产品思路”，而不是上传全部运行数据。
 
-- 风格提取
-- 设定抽取
-- 检索增强
-- 章节生成
-- 后续校验
+建议公开保留：
 
-它更适合作为 AI 应用原型和产品思路验证项目，而不是单纯的模型调用 Demo。
+- `style_imitation_code/`
+- `docs/`
+- `tests/`
+- `.env.example`
+- `requirements.txt`
+- `README.md`
+
+建议忽略：
+
+- `.env`
+- 原著文本与生成结果
+- 本地模型缓存
+- 虚拟环境
+- 临时脚本与个人调试残留
+- `cs.py`
 
 ## 反馈与后续
 
@@ -162,6 +227,6 @@ python style_imitation_code/main.py
 
 ## 文档导航
 
-- GitHub 首页说明：当前文件
+- GitHub 首页说明：当前文档
 - 技术文档：[docs/technical-design.md](docs/technical-design.md)
 - 旧版详细说明：[功能说明文档.txt](功能说明文档.txt)

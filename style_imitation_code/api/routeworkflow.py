@@ -18,7 +18,15 @@ from core._core_utils import (
     mask_sensitive_info, 
     validate_safe_param
 )
-from .tasks import TASKS, run_task_safely_pool, load_tasks_safe, save_and_prune_tasks_async, add_task_safe
+from .tasks import (
+    TASKS,
+    add_task_safe,
+    cancel_all_tasks,
+    cancel_latest_task,
+    load_tasks_safe,
+    run_task_safely_pool,
+    save_and_prune_tasks_async,
+)
 
 router = APIRouter()
 load_tasks_safe() 
@@ -60,12 +68,72 @@ async def list_tasks():
     sorted_tasks = sorted(TASKS.items(), key=lambda x: x[1].get('start_time') or x[1].get('created_at', ''), reverse=True)
     return [{"id": k, **v} for k, v in sorted_tasks[:20]]
 
+
+@router.post("/api/task-actions/cancel_latest")
+async def cancel_latest_task_action():
+    result = await cancel_latest_task()
+    if not result:
+        return {"status": "noop", "message": "当前没有可终止任务"}
+    if result.get("already_finished"):
+        return {
+            "status": "noop",
+            "message": f"最近任务已结束：{result['task_name']}",
+            "task_id": result["task_id"],
+        }
+    return {
+        "status": "success",
+        "message": f"已终止最近任务：{result['task_name']}",
+        "task_id": result["task_id"],
+    }
+
+
+@router.post("/api/task-actions/cancel_all")
+async def cancel_all_tasks_action():
+    results = await cancel_all_tasks()
+    if not results:
+        return {"status": "noop", "message": "当前没有可终止任务", "task_ids": []}
+    return {
+        "status": "success",
+        "message": f"已终止 {len(results)} 个任务",
+        "task_ids": [item["task_id"] for item in results],
+    }
+
 @router.get("/api/tasks/{task_id}")
 async def get_task_status(task_id: str):
     task = TASKS.get(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
     return task
+
+
+@router.post("/api/tasks/cancel_latest")
+async def cancel_latest_task_route():
+    result = await cancel_latest_task()
+    if not result:
+        return {"status": "noop", "message": "当前没有可终止任务"}
+    if result.get("already_finished"):
+        return {
+            "status": "noop",
+            "message": f"最近任务已结束：{result['task_name']}",
+            "task_id": result["task_id"],
+        }
+    return {
+        "status": "success",
+        "message": f"已终止最近任务：{result['task_name']}",
+        "task_id": result["task_id"],
+    }
+
+
+@router.post("/api/tasks/cancel_all")
+async def cancel_all_tasks_route():
+    results = await cancel_all_tasks()
+    if not results:
+        return {"status": "noop", "message": "当前没有可终止任务", "task_ids": []}
+    return {
+        "status": "success",
+        "message": f"已终止 {len(results)} 个任务",
+        "task_ids": [item["task_id"] for item in results],
+    }
 
 @router.post("/api/scripts/f4a_completion")
 async def run_f4a_completion(req: SettingCompletionRequest, x_api_key: str = Header(None)):
