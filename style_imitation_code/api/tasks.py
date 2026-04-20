@@ -36,6 +36,91 @@ db_save_lock = asyncio.Lock()
 tasks_state_lock = asyncio.Lock()
 # 监控池互斥锁，严格保护 ACTIVE_PROCESSES 防止迭代时字典改变大小引发并发异常
 active_procs_lock = asyncio.Lock()
+ACTIVE_TASK_STATUSES = {"running", "pending", "queued"}
+
+
+def _task_sort_key(task: dict) -> str:
+    return task.get("start_time") or task.get("created_at") or ""
+
+
+def _append_task_log(task: dict, message: str, key: str = "stdout"):
+    existing = task.get(key, "")
+    merged_text = f"{existing}{message}"
+    task[key] = merged_text[-MAX_LOG_BUFFER_LENGTH:]
+
+
+def _mark_task_cancelled(task: dict, reason: str):
+    task["status"] = "cancelled"
+    task["error"] = reason
+    task["end_time"] = datetime.now().isoformat()
+    _append_task_log(task, f"\n[SYSTEM] {reason}\n")
+
+
+async def _terminate_process(process):
+    if not process:
+        return
+    try:
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+            capture_output=True,
+            check=False,
+        )
+        await process.wait()
+    except (OSError, ProcessLookupError):
+        pass
+
+
+async def cancel_task_by_id(task_id: str, reason: str = "用户手动终止任务"):
+    async with tasks_state_lock:
+        task = TASKS.get(task_id)
+        if not task:
+            return None
+        if task.get("status") not in ACTIVE_TASK_STATUSES:
+            return {
+                "task_id": task_id,
+                "task_name": task.get("name", task_id),
+                "already_finished": True,
+                "status": task.get("status"),
+            }
+        _mark_task_cancelled(task, reason)
+        task_name = task.get("name", task_id)
+
+    async with active_procs_lock:
+        process = ACTIVE_PROCESSES.get(task_id)
+
+    await _terminate_process(process)
+    asyncio.create_task(save_and_prune_tasks_async())
+    return {"task_id": task_id, "task_name": task_name, "already_finished": False}
+
+
+async def cancel_latest_task(reason: str = "用户手动终止最近任务"):
+    async with tasks_state_lock:
+        active_items = [
+            (task_id, task)
+            for task_id, task in TASKS.items()
+            if task.get("status") in ACTIVE_TASK_STATUSES
+        ]
+        if not active_items:
+            return None
+        task_id, _ = max(active_items, key=lambda item: _task_sort_key(item[1]))
+
+    return await cancel_task_by_id(task_id, reason=reason)
+
+
+async def cancel_all_tasks(reason: str = "用户手动终止全部任务"):
+    async with tasks_state_lock:
+        task_ids = [
+            task_id
+            for task_id, task in TASKS.items()
+            if task.get("status") in ACTIVE_TASK_STATUSES
+        ]
+
+    cancelled = []
+    for task_id in task_ids:
+        result = await cancel_task_by_id(task_id, reason=reason)
+        if result and not result.get("already_finished"):
+            cancelled.append(result)
+    return cancelled
 
 def load_tasks_safe():
     """防线四：启动时的防尸变机制 - 懒加载自愈方案"""
@@ -177,11 +262,12 @@ async def run_task_safely(task_id: str, cmd_list: list, api_key: str = None):
         # 排队获取并发锁
         async with background_semaphore:
             async with tasks_state_lock:
-                if task_id in TASKS:
-                    TASKS[task_id]["status"] = "running"
-                    TASKS[task_id]["start_time"] = datetime.now().isoformat()
-                    TASKS[task_id]["last_active_time"] = time.time()
-                    TASKS[task_id]["stdout"] = "[系统] 引擎启动成功，开始执行底层计算流：\n"
+                if task_id not in TASKS or TASKS[task_id].get("status") == "cancelled":
+                    return
+                TASKS[task_id]["status"] = "running"
+                TASKS[task_id]["start_time"] = datetime.now().isoformat()
+                TASKS[task_id]["last_active_time"] = time.time()
+                TASKS[task_id]["stdout"] = "[系统] 引擎启动成功，开始执行底层计算流：\n"
 
             process = await asyncio.create_subprocess_exec(
                 *cmd_list,
@@ -194,6 +280,14 @@ async def run_task_safely(task_id: str, cmd_list: list, api_key: str = None):
             # 将进程安全注册进看门狗巡检池
             async with active_procs_lock:
                 ACTIVE_PROCESSES[task_id] = process
+
+            async with tasks_state_lock:
+                cancelled_before_reader = (
+                    task_id not in TASKS or TASKS[task_id].get("status") == "cancelled"
+                )
+            if cancelled_before_reader:
+                await _terminate_process(process)
+                return
             
             async def pipe_reader(stream, key):
                 while True:
@@ -240,7 +334,7 @@ async def run_task_safely(task_id: str, cmd_list: list, api_key: str = None):
                 
                 async with tasks_state_lock:
                     if task_id in TASKS:
-                        if TASKS[task_id].get("status") != "failed":
+                        if TASKS[task_id].get("status") not in {"failed", "cancelled"}:
                             TASKS[task_id]["returncode"] = process.returncode
                             TASKS[task_id]["status"] = "success" if process.returncode == 0 else "failed"
                                 
