@@ -168,6 +168,33 @@ export function useWorkflow(projectModule) {
         if (isAutoRunning.value || isAutoPaused.value) {
             cancelAutoFlag.value = true;
             autoRunProgress.value = "正在强制终止流水线...";
+            cancelLatestTask({ silent: true }).catch(() => {});
+        }
+    };
+
+    const cancelLatestTask = async ({ silent = false } = {}) => {
+        try {
+            const res = await fetch('/api/task-actions/cancel_latest', { method: 'POST' });
+            const data = await handleApiResponse(res);
+            await pollTasks();
+            if (!silent && data.message) alert(data.message);
+            return data;
+        } catch (e) {
+            if (!silent) alert(`终止最近任务失败: ${e.message}`);
+            throw e;
+        }
+    };
+
+    const cancelAllTasks = async ({ silent = false } = {}) => {
+        try {
+            const res = await fetch('/api/task-actions/cancel_all', { method: 'POST' });
+            const data = await handleApiResponse(res);
+            await pollTasks();
+            if (!silent && data.message) alert(data.message);
+            return data;
+        } catch (e) {
+            if (!silent) alert(`终止全部任务失败: ${e.message}`);
+            throw e;
         }
     };
 
@@ -180,6 +207,7 @@ export function useWorkflow(projectModule) {
                     if (res.ok) { 
                         const task = await res.json(); 
                         if (task.status === 'success') resolve(task); 
+                        else if (task.status === 'cancelled') reject(new Error(task.error || '任务已取消')); 
                         else if (task.status === 'failed' || task.status === 'error') reject(new Error(task.error || task.stderr || '任务执行失败')); 
                         else setTimeout(check, 2000); 
                     } else if (res.status === 404) { 
@@ -485,7 +513,7 @@ export function useWorkflow(projectModule) {
         recommendedChars, freqChars, customCharInput, showCharSelector, isLoadingChars, workflowCharName, workflowCharSelect,
         workflowChapterName, workflowChapterSelect, workflowChapterBrief, workflowF4aMode, workflowF4aInput,
         f4aWorldview, f4aChar, projectCharacters, kbProject, kbType, kbItems, kbSelectedFile, kbContent,
-        loadReferences, handleFileUpload, submitUpload, loadCharacterSuggestions, stopAutoPipeline, executePipelineStep,
+        loadReferences, handleFileUpload, submitUpload, loadCharacterSuggestions, stopAutoPipeline, cancelLatestTask, cancelAllTasks, executePipelineStep,
         runStyleScriptAuto, continueAutoPipeline, runProjectScript, runStyleScript, fetchKbFilesList, fetchKbContent, saveKbContent
     };
 }

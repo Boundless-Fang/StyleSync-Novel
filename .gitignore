@@ -1,5 +1,6 @@
 # === 1. 安全与敏感信息 (绝对不能传) ===
 .env
+.env.local
 api_key.txt
 *.pem
 *.key
@@ -45,3 +46,10 @@ venv/
 .idea/
 .DS_Store
 Thumbs.db
+
+#=== 7
+*.log
+.cache/
+system_tasks_db.json
+pytest-output.txt
+cs.py
