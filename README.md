@@ -120,13 +120,13 @@
 任务队列当前将“停止任务”和“删除记录”分开处理：
 
 - `终止`
-  - 终止最近
-  - 终止全部
-  - 终止勾选
+  - `终止最近`
+  - `终止全部`
+  - `终止勾选`
 - `清除`
-  - 清除最远
-  - 清除全部
-  - 清除勾选
+  - `清除最远`
+  - `清除全部`
+  - `清除勾选`
 
 当前真实语义是：
 
@@ -148,38 +148,30 @@
 - 大模型：DeepSeek 系列模型
 - 运行方式：本地工作区 + 云端 LLM API
 
-更完整的设计说明见 [docs/technical-design.md](D:\StyleSync-Novel\docs\technical-design.md)。
+更完整的设计说明见 [docs/technical-design.md](docs/technical-design.md)。
 
 ## 项目结构
 
 ```text
 StyleSync-Novel/
 ├─ style_imitation_code/
-│  ├─ api/
-│  ├─ core/
-│  ├─ frontend/
-│  ├─ scripts/
-│  └─ main.py
-├─ docs/
-├─ dictionaries/
-├─ tests/
+│  ├─ api/                  # FastAPI 路由、任务调度、项目接口
+│  ├─ core/                 # LLM、RAG、配置与通用工具
+│  ├─ frontend/             # 前端页面与交互逻辑
+│  ├─ scripts/              # f0-f7 工作流脚本
+│  └─ main.py               # 服务启动入口
+├─ docs/                    # 技术设计与说明文档
+├─ tests/                   # 接口测试与本地测试工具
+├─ dictionaries/            # 词库与可扩展配置
+├─ reference_novels/        # 运行后使用：参考文本输入目录
+├─ text_style_imitation/    # 运行后生成：风格分析与索引产物
+├─ novel_projects/          # 运行后生成：项目正文、知识库与中间结果
+├─ text_testing_code/       # 本地测试代码目录
 ├─ requirements.txt
 └─ README.md
 ```
 
-说明：
-
-- `style_imitation_code/`：核心实现
-- `docs/`：设计与说明文档
-- `tests/`：接口测试与本地测试工具
-- `dictionaries/`：词库与可扩展配置目录
-
-以下目录更偏向运行期数据，不建议直接公开上传：
-
-- `reference_novels/`
-- `text_style_imitation/`
-- `novel_projects/`
-- `text_testing_code/`
+其中 `reference_novels/`、`text_style_imitation/`、`novel_projects/` 等目录主要承载运行期数据，公开仓库中通常不提交其具体内容。
 
 ## 快速开始
 
@@ -307,5 +299,5 @@ python tests/0_test_runner_gui.py
 
 ## 文档导航
 
-- 总览：当前 `README`
-- 技术设计：[docs/technical-design.md](D:\StyleSync-Novel\docs\technical-design.md)
+- GitHub 首页说明：当前文件
+- 技术文档：[docs/technical-design.md](docs/technical-design.md)
