@@ -11,6 +11,9 @@ from core._core_utils import async_append_text, async_atomic_write, async_smart_
 
 router = APIRouter()
 
+FANFIC_MODES = {"同人", "fanfic"}
+ORIGINAL_MODES = {"原创", "original"}
+
 
 def get_real_dir(proj_name: str):
     if proj_name.startswith("style@@"):
@@ -22,19 +25,17 @@ def get_validated_target_path(proj_name: str, file_path: str) -> str:
     raw_base_dir = get_real_dir(proj_name)
     safe_base_dir = os.path.realpath(os.path.abspath(raw_base_dir))
 
-    if proj_name.startswith("style@@"):
-        expected_root = os.path.realpath(os.path.abspath(STYLE_DIR))
-    else:
-        expected_root = os.path.realpath(os.path.abspath(PROJ_DIR))
-
+    expected_root = os.path.realpath(
+        os.path.abspath(STYLE_DIR if proj_name.startswith("style@@") else PROJ_DIR)
+    )
     norm_root = os.path.normcase(expected_root)
     norm_base = os.path.normcase(safe_base_dir)
 
     try:
         if os.path.commonpath([norm_root, norm_base]) != norm_root:
-            raise HTTPException(status_code=403, detail="非法项目名，越权访问被拦截")
+            raise HTTPException(status_code=403, detail="非法项目名，访问已被拦截")
     except ValueError as exc:
-        raise HTTPException(status_code=403, detail="跨盘符项目路径非法") from exc
+        raise HTTPException(status_code=403, detail="项目路径跨盘，访问已被拦截") from exc
 
     target_path = os.path.realpath(os.path.abspath(os.path.join(safe_base_dir, file_path)))
     norm_target = os.path.normcase(target_path)
@@ -43,7 +44,7 @@ def get_validated_target_path(proj_name: str, file_path: str) -> str:
         if os.path.commonpath([norm_base, norm_target]) != norm_base:
             raise ValueError("检测到目录穿越")
     except ValueError as exc:
-        raise HTTPException(status_code=403, detail=f"越权访问被拦截: {exc}") from exc
+        raise HTTPException(status_code=403, detail=f"越权访问已被拦截: {exc}") from exc
 
     return target_path
 
@@ -120,9 +121,9 @@ def ensure_required_files(target_proj_dir: str) -> None:
         if not os.path.exists(file_path):
             open(file_path, "w", encoding="utf-8").close()
 
-    first_chapter_path = os.path.join(target_proj_dir, "content", "第一章.txt")
+    first_chapter_path = os.path.join(target_proj_dir, "content", "chapter_1.txt")
     with open(first_chapter_path, "w", encoding="utf-8") as file:
-        file.write("这里是小说的开头...")
+        file.write("这里是小说的开头……")
 
 
 @router.get("/api/projects")
@@ -146,10 +147,12 @@ async def create_project(proj: ProjectCreate):
     def _execute_project_initialization():
         init_project_structure(target_proj_dir, proj)
 
-        if proj.branch == "同人":
+        if proj.branch in FANFIC_MODES:
             init_fanfic_project(target_proj_dir, src_style_dir)
-        elif proj.branch == "原创":
+        elif proj.branch in ORIGINAL_MODES:
             init_original_project(target_proj_dir, src_style_dir)
+        else:
+            raise ValueError(f"不支持的项目模式: {proj.branch}")
 
         ensure_required_files(target_proj_dir)
 
@@ -159,10 +162,10 @@ async def create_project(proj: ProjectCreate):
         await asyncio.to_thread(_execute_project_initialization)
         return {"status": "success"}
     except ValueError as exc:
-        return {"error": str(exc)}
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except OSError as exc:
         print(f"[ERROR] 项目初始化失败: {exc}")
-        raise HTTPException(status_code=500, detail="项目创建遇到存储层异常") from exc
+        raise HTTPException(status_code=500, detail="项目创建失败，存储层出现异常") from exc
 
 
 @router.get("/api/projects/{proj_name}/chapters")
@@ -183,7 +186,12 @@ async def get_characters(proj_name: str):
 
 
 @router.post("/api/projects/{proj_name}/chapters/{chap_name}")
-async def create_or_rename_chapter(proj_name: str, chap_name: str, new_name: str = None, force_overwrite: bool = False):
+async def create_or_rename_chapter(
+    proj_name: str,
+    chap_name: str,
+    new_name: str = None,
+    force_overwrite: bool = False,
+):
     content_dir = os.path.join(PROJ_DIR, proj_name, "content")
 
     target_name = new_name if new_name else chap_name
@@ -211,7 +219,7 @@ async def create_or_rename_chapter(proj_name: str, chap_name: str, new_name: str
 
                             time.sleep(base_delay * (1.5 ** attempt) + random.uniform(0, 0.1))
                         else:
-                            raise PermissionError("目标文件被系统或外部进程占用，超过重试上限") from exc
+                            raise PermissionError("目标文件正被系统或其他进程占用，已超过重试上限") from exc
         else:
             with open(target_path, "w", encoding="utf-8"):
                 pass
@@ -225,7 +233,7 @@ async def create_or_rename_chapter(proj_name: str, chap_name: str, new_name: str
         print(f"[ERROR] 章节覆盖失败: {exc}")
         raise HTTPException(status_code=500, detail="文件操作失败，目标文件正被其他进程占用") from exc
     except OSError as exc:
-        print("[ERROR] 章节操作失败: 存储层异常")
+        print(f"[ERROR] 章节操作失败: {exc}")
         raise HTTPException(status_code=500, detail="执行章节文件操作时发生异常") from exc
 
 
@@ -238,7 +246,7 @@ async def get_chapter_content(proj_name: str, chap_name: str):
             content = await async_smart_read_text(filepath)
             return {"content": content}
         except OSError as exc:
-            raise HTTPException(status_code=500, detail="文件读取失败或已被其他线程占用") from exc
+            raise HTTPException(status_code=500, detail="文件读取失败，或文件正被其他进程占用") from exc
     return {"content": ""}
 
 
@@ -259,18 +267,18 @@ async def update_chapter_content(proj_name: str, chap_name: str, update: Chapter
 async def append_to_novel(proj_name: str, req: AppendContent):
     content_dir = os.path.join(PROJ_DIR, proj_name, "content")
     if not os.path.exists(content_dir):
-        return {"error": "未找到章节内容目录"}
+        raise HTTPException(status_code=404, detail="未找到章节内容目录")
 
     chapters = [f for f in os.listdir(content_dir) if f.endswith(".txt")]
     if not chapters:
-        return {"error": "未找到章节文件"}
+        raise HTTPException(status_code=404, detail="未找到章节文件")
 
     target_file = os.path.join(content_dir, chapters[0])
     try:
         await async_append_text(target_file, "\n\n" + req.content)
         return {"status": "success"}
     except OSError as exc:
-        raise HTTPException(status_code=500, detail="追加内容失败: 底层I/O锁定") from exc
+        raise HTTPException(status_code=500, detail="追加内容失败：底层 I/O 被锁定") from exc
 
 
 @router.get("/api/projects/{proj_name}/settings/{file_path:path}")
@@ -281,13 +289,13 @@ async def get_project_setting(proj_name: str, file_path: str):
         return {"content": exc.detail}
 
     if not os.path.isfile(target_path):
-        return {"content": "文件不存在或尚未生成，请检查工作流执行状态"}
+        return {"content": "文件不存在或尚未生成，请先检查工作流执行状态。"}
 
     try:
         content = await async_smart_read_text(target_path)
         return {"content": content}
     except OSError:
-        return {"content": "系统错误：文件读取异常或被占用"}
+        return {"content": "系统错误：文件读取异常，或文件正被占用。"}
 
 
 @router.put("/api/projects/{proj_name}/settings/{file_path:path}")
@@ -304,7 +312,7 @@ async def update_project_setting(proj_name: str, file_path: str, update: Setting
         await async_atomic_write(target_path, update.content, "text")
         return {"status": "success"}
     except OSError as exc:
-        raise HTTPException(status_code=500, detail="目录构建或文件写入时发生I/O异常") from exc
+        raise HTTPException(status_code=500, detail="目录创建或文件写入时发生 I/O 异常") from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail="文件并发写盘超过重试上限") from exc
 

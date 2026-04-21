@@ -100,6 +100,19 @@ def test_chat_rejects_out_of_range_temperature():
     assert response.status_code == 422
 
 
+def test_chat_rejects_blank_message_content():
+    response = client.post(
+        "/api/chat",
+        json={
+            "api_key": "test-key",
+            "model": "deepseek-chat",
+            "messages": [{"role": "user", "content": "   "}],
+        },
+    )
+
+    assert response.status_code == 422
+
+
 def test_chat_stream_returns_text_and_usage(monkeypatch):
     monkeypatch.setattr(routecore, "AsyncOpenAI", _FakeAsyncOpenAI)
 
