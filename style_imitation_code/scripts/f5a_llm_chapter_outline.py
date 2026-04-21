@@ -1,21 +1,23 @@
-import os
 import json
+import os
 
-from core._core_cli_runner import safe_run_app, inject_env, HeadlessBaseTask
-inject_env()
+import numpy as np
 
+from core._core_cli_runner import HeadlessBaseTask, inject_env, safe_run_app
 from core._core_config import PROJ_DIR
-from core._core_utils import smart_read_text, atomic_write
 from core._core_llm import call_deepseek_api
 from core._core_rag import RAGRetriever
-import numpy as np
+from core._core_utils import atomic_write, smart_read_text
+
+inject_env()
+
 
 class ChapterOutlineApp(HeadlessBaseTask):
     def __init__(self):
         super().__init__()
 
     def execute_logic(self):
-        pass # 此方法已完全交由 Web API 层通过 run_headless 静默执行
+        pass
 
     @staticmethod
     def read_file_safe(filepath, max_len=None):
@@ -27,42 +29,131 @@ class ChapterOutlineApp(HeadlessBaseTask):
         return ""
 
     @staticmethod
-    def get_filtered_characters(target_dir, chapter_brief, log_func):
+    def create_default_stage():
+        return {
+            "content": "",
+            "ban": "无",
+            "narrative": "顺叙",
+            "depiction": [],
+            "drive": "场景",
+            "word_ratio": "",
+            "reveal": "无",
+            "foreshadowing": "无",
+        }
+
+    @staticmethod
+    def normalize_stage(stage):
+        data = dict(stage or {})
+        depiction = data.get("depiction") or []
+        if not isinstance(depiction, list):
+            depiction = [depiction]
+        return {
+            "content": str(data.get("content") or "").strip(),
+            "ban": str(data.get("ban") or "无").strip() or "无",
+            "narrative": str(data.get("narrative") or "顺叙").strip() or "顺叙",
+            "depiction": [str(item).strip() for item in depiction if str(item).strip()],
+            "drive": str(data.get("drive") or "场景").strip() or "场景",
+            "word_ratio": str(data.get("word_ratio") or "").strip(),
+            "reveal": str(data.get("reveal") or "无").strip() or "无",
+            "foreshadowing": str(data.get("foreshadowing") or "无").strip() or "无",
+        }
+
+    @staticmethod
+    def normalize_outline_payload(chapter_payload):
+        if isinstance(chapter_payload, dict):
+            data = dict(chapter_payload)
+        else:
+            text = str(chapter_payload).strip()
+            data = {"chapter_brief": text, "brief": text}
+
+        brief = str(
+            data.get("chapter_brief")
+            or data.get("brief")
+            or data.get("summary")
+            or ""
+        ).strip()
+
+        structure = data.get("structure") or {}
+        return {
+            "raw": data,
+            "brief": brief or "无明确梗概，请根据系统输入谨慎生成本章骨架。",
+            "boundary": str(
+                data.get("chapter_boundary")
+                or data.get("boundary")
+                or "未提供明确边界，默认停在本章核心事件完成后的首个自然悬停点。"
+            ).strip(),
+            "stage": str(data.get("event_stage") or data.get("stage") or "未指定").strip(),
+            "novel_stage": str(data.get("novel_stage") or "未指定").strip(),
+            "functions": data.get("chapter_functions") or data.get("functions") or [],
+            "person": str(data.get("person") or "未指定").strip(),
+            "perspective": str(data.get("perspective") or "未指定").strip(),
+            "characters": data.get("characters") or data.get("cast") or [],
+            "target_words": str(data.get("target_words") or data.get("word_count") or "3000字左右").strip(),
+            "scene_switch": str(data.get("scene_switch") or "未指定").strip(),
+            "pace": str(data.get("pace") or data.get("narrative_pace") or "未指定").strip(),
+            "ban": str(data.get("ban") or data.get("forbidden") or data.get("chapter_ban") or "无").strip(),
+            "structure": {
+                "opening": ChapterOutlineApp.normalize_stage(structure.get("opening")),
+                "buildup": ChapterOutlineApp.normalize_stage(structure.get("buildup")),
+                "climax": ChapterOutlineApp.normalize_stage(structure.get("climax")),
+                "ending": ChapterOutlineApp.normalize_stage(structure.get("ending")),
+            },
+        }
+
+    @staticmethod
+    def format_choice_list(value, default="未指定"):
+        if isinstance(value, (list, tuple, set)):
+            cleaned = [str(item).strip() for item in value if str(item).strip()]
+            return " / ".join(cleaned) if cleaned else default
+        text = str(value).strip()
+        return text or default
+
+    @staticmethod
+    def get_filtered_characters(target_dir, chapter_data, log_func):
         char_dir = os.path.join(target_dir, "character_profiles")
         if not os.path.exists(char_dir):
             return "无相关角色卡数据。"
-        
+
+        scan_text = "\n".join(
+            [
+                chapter_data["brief"],
+                ChapterOutlineApp.format_choice_list(chapter_data["characters"], default=""),
+            ]
+        )
         all_char_files = [f for f in os.listdir(char_dir) if f.endswith(".md")]
         relevant_texts = []
         found_names = []
 
+        explicit_characters = [str(item).strip() for item in chapter_data["characters"] if str(item).strip()]
         for f_name in all_char_files:
             char_name_base = os.path.splitext(f_name)[0]
-            if char_name_base in chapter_brief:
+            matched = char_name_base in explicit_characters or char_name_base in scan_text
+            if matched:
                 content = ChapterOutlineApp.read_file_safe(os.path.join(char_dir, f_name))
                 if content:
                     relevant_texts.append(content)
                     found_names.append(char_name_base)
-        
+
         if not relevant_texts:
-            log_func("[INFO] 未在简述中检测到特定角色名，将跳过角色卡注入，防止 OOM。")
-            return "本章节未提及特定已知角色卡中的人物。"
-        
-        log_func(f"[INFO] 严格匹配命中关键角色: {', '.join(found_names)}，已成功注入其专属角色卡。")
+            log_func("[INFO] 未检测到明确出场角色，f5a 将只依据世界观与剧情压缩信息生成大纲。")
+            return "本章未匹配到明确角色卡，可仅依据世界观与剧情压缩信息生成。"
+
+        log_func(f"[INFO] f5a 已注入角色卡: {', '.join(found_names)}")
         return "\n\n---\n\n".join(relevant_texts)
 
     @staticmethod
     def retrieve_context(index_path, chunks_path, retriever, query_vec, k_limit):
         try:
             index, chunks = retriever.load_index(index_path, chunks_path)
-            distances, indices = index.search(np.array(query_vec).astype('float32'), k=k_limit)
-            
+            distances, indices = index.search(np.array(query_vec).astype("float32"), k=k_limit)
             retrieved_data = []
             for idx in indices[0]:
                 if idx != -1 and idx < len(chunks):
                     chunk_item = chunks[idx]
                     if isinstance(chunk_item, dict):
-                        retrieved_data.append(chunk_item.get("summary", chunk_item.get("raw_chunk", chunk_item.get("text", ""))))
+                        retrieved_data.append(
+                            chunk_item.get("summary", chunk_item.get("raw_chunk", chunk_item.get("text", "")))
+                        )
                     else:
                         retrieved_data.append(chunk_item)
             return retrieved_data
@@ -70,124 +161,257 @@ class ChapterOutlineApp(HeadlessBaseTask):
             return []
 
     @staticmethod
-    def execute_generation(project_name, chapter_name, chapter_brief, model, log_func):
+    def render_stage_reference(title, stage_data):
+        depiction = ChapterOutlineApp.format_choice_list(stage_data["depiction"], default="未指定")
+        return (
+            f"## {title}\n"
+            f"- 本章内容：{stage_data['content'] or '未指定'}\n"
+            f"- 禁止事项：{stage_data['ban']}\n"
+            f"- 叙述手法：{stage_data['narrative']}\n"
+            f"- 描写手法：{depiction}\n"
+            f"- 推进方式：{stage_data['drive']}\n"
+            f"- 字数占比：{stage_data['word_ratio'] or '未指定'}\n"
+            f"- 信息揭示：{stage_data['reveal']}\n"
+            f"- 伏笔/铺垫：{stage_data['foreshadowing']}\n"
+        )
+
+    @staticmethod
+    def execute_generation(project_name, chapter_payload, chapter_name, model, log_func):
         target_dir = os.path.join(PROJ_DIR, project_name)
         if not os.path.exists(target_dir):
-            log_func(f"[ERROR] 错误: 未找到项目目录 {target_dir}")
+            log_func(f"[ERROR] 未找到项目目录: {target_dir}")
             return False
-            
+
         outlines_dir = os.path.join(target_dir, "chapter_structures")
         os.makedirs(outlines_dir, exist_ok=True)
         save_path = os.path.join(outlines_dir, f"{chapter_name}_outline.md")
+        chapter_data = ChapterOutlineApp.normalize_outline_payload(chapter_payload)
 
-        # 1. 静态加载设定
         world_settings = ChapterOutlineApp.read_file_safe(os.path.join(target_dir, "world_settings.md")) or "无详细世界观。"
-        characters_info = ChapterOutlineApp.get_filtered_characters(target_dir, chapter_brief, log_func)
+        characters_info = ChapterOutlineApp.get_filtered_characters(target_dir, chapter_data, log_func)
+        plot_outline_summary = (
+            ChapterOutlineApp.read_file_safe(os.path.join(target_dir, "plot_outlines.md"), max_len=4000)
+            or "无剧情压缩结果，可在缺失时正常运行。"
+        )
 
-        # 2. 双轨 RAG 检索
         rag_context_original = "无原著背景库参考。"
         rag_context_project = "无前文剧情记忆。"
-        
         try:
             retriever = RAGRetriever()
             embedder = retriever.get_embedder()
-            query_vec = embedder.encode([chapter_brief]) 
-            
+            query_vec = embedder.encode([chapter_data["brief"]])
+
             hierarchical_db = os.path.join(target_dir, "hierarchical_rag_db")
             if os.path.exists(hierarchical_db):
-                log_func("检测到同人原著参考库，正在提取背景环境...")
                 idx_path = os.path.join(hierarchical_db, "plot_summary.index")
                 map_path = os.path.join(hierarchical_db, "summary_to_raw_mapping.json")
                 res = ChapterOutlineApp.retrieve_context(idx_path, map_path, retriever, query_vec, k_limit=2)
-                if res: rag_context_original = "\n\n".join(res)
+                if res:
+                    rag_context_original = "\n\n".join(res)
 
             context_db = os.path.join(target_dir, "context_rag_db")
             if os.path.exists(context_db):
-                log_func("检测到当前项目前文 RAG 库，正在恢复剧情记忆...")
                 idx_path = os.path.join(context_db, "vector.index")
                 map_path = os.path.join(context_db, "chunks.json")
                 res = ChapterOutlineApp.retrieve_context(idx_path, map_path, retriever, query_vec, k_limit=4)
-                if res: rag_context_project = "\n\n---\n\n".join(res)
-            else:
-                log_func("[WARN] 未检测到 context_rag_db，可能遭遇断层。建议前往工作台执行一次 f4c 构建前文记忆。")
+                if res:
+                    rag_context_project = "\n\n---\n\n".join(res)
         except Exception as e:
-            log_func(f"[WARN] 双轨 RAG 模块非致命异常，已执行降级绕过: {e}")
+            log_func(f"[WARN] f5a 检索参考片段失败，已降级继续: {e}")
 
-        # 3. 构建 Prompt 并请求大模型
-        prompt_header = """你是一个顶级网文编剧。请根据以下信息，为用户输入的“本章核心简述”扩写一份【逻辑极其严密、冲突激烈、节奏紧凑】的章节大纲。
+        structure_reference = "\n".join(
+            [
+                ChapterOutlineApp.render_stage_reference("1. 开端 / 承接", chapter_data["structure"]["opening"]),
+                ChapterOutlineApp.render_stage_reference("2. 铺垫 / 延展", chapter_data["structure"]["buildup"]),
+                ChapterOutlineApp.render_stage_reference("3. 高潮 / 爽点", chapter_data["structure"]["climax"]),
+                ChapterOutlineApp.render_stage_reference("4. 钩子 / 结尾", chapter_data["structure"]["ending"]),
+            ]
+        )
 
-### 核心任务与边界清单（绝密指令）：
-1. 剧情密度控制（Density Control）：如果用户提供的简述包含了过多的事件转折，请强行放缓节奏！你只需重点扩写简述中的【前一到两个核心事件】，剩余事件全部砍掉，留作下一章的悬念。绝不允许把剧情写成走马观花的流水账。
-2. 剧情边界锁死（Boundary Lock）：必须且只能在用户简述的进度处停止！绝不允许擅自推进后续剧情，绝不允许凭空引入简述中未提及的怪物、新人物或大场面。
-3. 人物对齐：必须符合所提供的角色卡性格与力量等级，增加言语试探与心理博弈，禁止一上来就无脑放法宝互砸。
+        sys_prompt = """你是一个专业的长篇小说章节策划助手。你的任务不是直接写正文，而是基于系统提供的背景信息与用户提供的本章意图，生成一份“可执行的章节大纲骨架”，供后续正文生成模块使用。
 
-请严格按以下 Markdown 格式输出：
+你的职责是：
+1. 先判断并明确本章在整卷/整本书中的位置与功能。
+2. 再根据本章功能与用户意图，设计本章的内部结构。
+3. 输出清晰、可执行、可直接交给正文生成模块使用的章节骨架。
 
-### 一、 核心要素
-- **写作目的**：
-- **场景分布**：（场景一、场景二...）
-- **核心冲突**：
+你必须遵守以下总规则：
 
-### 二、 细化大纲
-- **开篇（衔接前文）**：[具体描写环境与氛围]
-- **发展（矛盾升级）**：[此阶段必须包含多轮人物对话交锋与试探，严禁直接进入纯动作战斗]
-- **高潮（核心冲突）**：[具体描写，含情绪指令与动作拆解]
-- **结尾（悬念钩子）**：[具体描写，卡在最高潮或悬念处戛然而止，为下一章留扣]
+【规则一：本章定位优先】
+第一层“本章定位”优先级高于第二层“本章结构”。如果两者冲突，必须以“本章定位”为准。
 
-### 三、 细节注意
-- **关键动作建议**：
-- **雷点/禁忌**：
+【规则二：阶段强度允许浮动】
+“高潮 / 爽点”“钩子 / 结尾”是结构槽位，不代表每章都必须强烈爆发。
+如果本章不适合出现明显高潮或强钩子，可以弱化该阶段，但不能缺失结构上的收束、转接或后续牵引作用。
+
+【规则三：禁止擅自越界】
+必须严格停在用户给定的本章边界内。
+禁止擅自推进到下一章应承担的关键剧情。
+禁止引入用户未授权的重要新设定、关键新人物或重大剧情结果。
+禁止让人物行为明显违背既有设定。
+
+【规则四：结构优先于信息堆砌】
+你生成的是章节骨架，不是总结报告，也不是策划汇报。
+不要只罗列信息点，必须体现本章展开顺序、信息显露顺序、冲突推进顺序和收尾方式。
+
+【规则五：选项约束】
+默认情况下，所有带固定选项的字段，必须严格从给定选项中选择，不得自造类别，不得改写选项名称。
+只有带有“（允许发挥）”标记的字段，才允许自由填写。
+
+【规则六：输出格式】
+只输出 Markdown 纯文本。
+不要输出解释、寒暄、分析过程、提示词说明或任何额外备注。"""
+
+        user_input = f"""请根据以下信息，为本章生成一份“可执行的章节大纲骨架”。
+
+默认所有带固定选项的字段只能从选项中选择。只有标注“（允许发挥）”的字段允许自由填写。
 
 ---
-【基础设定与上下文矩阵】：
-"""
-        user_input = f"""{prompt_header}
-[世界观与底层设定]
+# 系统输入（背景信息）
+
+## 世界观
 {world_settings}
 
-[出场关键角色卡]
+## 角色信息卡
 {characters_info}
 
-[原著参考线索 (仅提供氛围与基础设定供参考，禁止完全照抄剧情)]
+## f4b 剧情压缩结果 / 摘要结果（如果为空允许正常运行）
+{plot_outline_summary}
+
+## 相关片段（少量 RAG 片段）
+[原著参考片段]
 {rag_context_original}
 
-[本书前文记忆剧情 (用于无缝衔接前章进度)]
+[前文记忆片段]
 {rag_context_project}
 
-[用户本章简述]
-{chapter_brief}
-"""
-        sys_prompt = "你是一个专业的小说大纲设计师，严禁废话，必须严格锁死剧情边界，只输出 Markdown。"
+---
+# 用户输入（本章意图）
+
+## 本章梗概
+{chapter_data["brief"]}
+
+## 本章边界
+{chapter_data["boundary"]}
+
+---
+# 参考定位（如果用户未完整提供，可结合系统输入补全，但枚举项仍只能从给定选项中选择）
+- 所处阶段：{chapter_data["stage"]}
+- 小说位置：{chapter_data["novel_stage"]}
+- 本章功能：{ChapterOutlineApp.format_choice_list(chapter_data["functions"])}
+- 人称：{chapter_data["person"]}
+- 视角：{chapter_data["perspective"]}
+- 出场角色：{ChapterOutlineApp.format_choice_list(chapter_data["characters"])}
+- 字数：{chapter_data["target_words"]}
+- 场景切换：{chapter_data["scene_switch"]}
+- 叙事节奏：{chapter_data["pace"]}
+- 本章禁止事项：{chapter_data["ban"]}
+
+---
+# 参考结构偏好（如用户未填写，则由你结合本章定位自行补全）
+{structure_reference}
+
+---
+# 输出要求
+
+请严格按以下结构输出：
+
+# 第一层：本章定位
+- 所处阶段：事件开端 / 事件推进 / 事件高潮 / 事件收束 / 日常 / 单章事件
+- 小说位置：前期 / 中期 / 后期
+- 本章功能（选择1-3个）：主线推进 / 引出人物 / 前情回顾 / 角色互动 / 打斗对抗 / 身份揭示 / 埋下伏笔 / 回收伏笔 / 设定展开 / 情绪过渡
+- 本章梗概：（允许发挥，一句话概括，采用“起因-经过-结果”形式）
+- 本章边界：（允许发挥，明确写到哪里停）
+- 人称：第一人称 / 有限制第三人称 / 无限制第三人称
+- 视角：男主视角 / 女主视角 / 中立视角
+- 出场角色：（允许发挥，列出本章必须出场或重点出场的角色）
+- 字数：（允许发挥，默认3000字左右，可根据本章功能微调）
+- 场景切换：无 / 一次 / 多次
+- 叙事节奏：慢 / 中 / 快
+- 本章禁止事项：（允许发挥，列出本章明确不能提前推进、不能提前揭示、不能出现的内容）
+
+# 第二层：本章结构
+
+## 1. 开端 / 承接
+- 本章内容：（允许发挥，一句话概括本阶段内容）
+- 禁止事项：（允许发挥，若无则填“无”）
+- 叙述手法：顺叙 / 插叙 / 倒叙 / 补叙 / 双线
+- 描写手法（选择1-3个）：对话与互动 / 叙事与动作 / 反应与侧写 / 解释与说明 / 环境与外貌
+- 推进方式：场景 / 动作 / 对话 / 反应 / 说明 / 心理 / 外貌
+- 字数占比：（允许发挥，写明该阶段占全文的比例与大致字数范围）
+- 信息揭示：无 / 直接揭示 / 延迟揭示 / 假设揭示 / 对话中带出 / 他人反应带出
+- 伏笔/铺垫：（允许发挥，没有则写“无”；有则写清具体内容）
+
+## 2. 铺垫 / 延展
+- 本章内容：（允许发挥，一句话概括本阶段内容）
+- 禁止事项：（允许发挥，若无则填“无”）
+- 叙述手法：顺叙 / 插叙 / 倒叙 / 补叙 / 双线
+- 描写手法（选择1-3个）：对话与互动 / 叙事与动作 / 反应与侧写 / 解释与说明 / 环境与外貌
+- 推进方式：场景 / 动作 / 对话 / 反应 / 说明 / 心理 / 外貌
+- 字数占比：（允许发挥，写明该阶段占全文的比例与大致字数范围）
+- 信息揭示：无 / 直接揭示 / 延迟揭示 / 假设揭示 / 对话中带出 / 他人反应带出
+- 伏笔/铺垫：（允许发挥，没有则写“无”；有则写清具体内容）
+
+## 3. 高潮 / 爽点
+- 本章内容：（允许发挥，一句话概括本阶段内容）
+- 禁止事项：（允许发挥，若无则填“无”）
+- 叙述手法：顺叙 / 插叙 / 倒叙 / 补叙 / 双线
+- 描写手法（选择1-3个）：对话与互动 / 叙事与动作 / 反应与侧写 / 解释与说明 / 环境与外貌
+- 推进方式：场景 / 动作 / 对话 / 反应 / 说明 / 心理 / 外貌
+- 字数占比：（允许发挥，写明该阶段占全文的比例与大致字数范围）
+- 信息揭示：无 / 直接揭示 / 延迟揭示 / 假设揭示 / 对话中带出 / 他人反应带出
+- 伏笔/铺垫：（允许发挥，没有则写“无”；有则写清具体内容）
+
+## 4. 钩子 / 结尾
+- 本章内容：（允许发挥，一句话概括本阶段内容）
+- 禁止事项：（允许发挥，若无则填“无”）
+- 叙述手法：顺叙 / 插叙 / 倒叙 / 补叙 / 双线
+- 描写手法（选择1-3个）：对话与互动 / 叙事与动作 / 反应与侧写 / 解释与说明 / 环境与外貌
+- 推进方式：场景 / 动作 / 对话 / 反应 / 说明 / 心理 / 外貌
+- 字数占比：（允许发挥，写明该阶段占全文的比例与大致字数范围）
+- 信息揭示：无 / 直接揭示 / 延迟揭示 / 假设揭示 / 对话中带出 / 他人反应带出
+- 伏笔/铺垫：（允许发挥，没有则写“无”；有则写清具体内容）
+
+---
+# 额外要求
+1. 不要把所有阶段写得同样饱满，本章定位决定结构强弱。
+2. 如果本章是推进、过渡、互动、铺垫类章节，高潮和钩子可以弱化，但不能缺失结构功能。
+3. 如果本章是高潮、揭示、对抗类章节，则必须保证高潮或揭示真正发生，而不是停留在空泛铺陈。
+4. 外貌描写、身份介绍、设定说明优先自然嵌入场景、动作、对话、反应中。
+5. 大纲必须可执行，能够直接交给正文生成模块使用。"""
 
         try:
             log_func("正在连接 DeepSeek 执行深度大纲推演...")
-            result_text = call_deepseek_api(system_prompt=sys_prompt, user_prompt=user_input, model=model, temperature=0.6)
-            
-            atomic_write(save_path, result_text, data_type='text')
-            log_func(f"[INFO] 架构生成成功！大纲已原子级落盘至: {save_path}")
+            result_text = call_deepseek_api(
+                system_prompt=sys_prompt, user_prompt=user_input, model=model, temperature=0.6
+            )
+            atomic_write(save_path, result_text, data_type="text")
+            log_func(f"[INFO] 章节大纲生成成功，已保存至: {save_path}")
             return True
         except Exception as e:
             log_func(f"[ERROR] 接口请求失败: {str(e)}")
             return False
 
+
 def run_headless(project_name, chapter_name, chapter_brief_json, model="deepseek-chat"):
-    import sys
     import base64
+    import sys
+
     try:
-        # 【核心修复】：拦截 Base64 前缀并安全解码
         if chapter_brief_json.startswith("b64:"):
-            chapter_brief_json = base64.b64decode(chapter_brief_json[4:]).decode('utf-8')
-        data = json.loads(chapter_brief_json)
-        chapter_brief = data.get("brief", "")
+            chapter_brief_json = base64.b64decode(chapter_brief_json[4:]).decode("utf-8")
+        chapter_brief = json.loads(chapter_brief_json)
     except Exception:
         chapter_brief = chapter_brief_json
 
     if not project_name or not chapter_name:
         sys.exit(1)
-        
+
     print(f"静默生成大纲中: {project_name} - {chapter_name}")
-    success = ChapterOutlineApp.execute_generation(project_name, chapter_name, chapter_brief, model, print)
-    if not success: sys.exit(1)
+    success = ChapterOutlineApp.execute_generation(project_name, chapter_brief, chapter_name, model, print)
+    if not success:
+        sys.exit(1)
+
 
 if __name__ == "__main__":
     safe_run_app(
@@ -196,5 +420,5 @@ if __name__ == "__main__":
         project_name="",
         chapter_name="",
         chapter_brief_json="",
-        model=""
+        model="",
     )
