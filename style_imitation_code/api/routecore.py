@@ -1,7 +1,7 @@
 import asyncio
 
 import requests
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from openai import AsyncOpenAI
 from pydantic import BaseModel
@@ -11,6 +11,7 @@ from .config import (
     DEEPSEEK_BASE_URL,
     SILICONFLOW_EMBEDDING_URL,
     get_default_embedding_model,
+    get_deepseek_api_key,
     get_embedding_api_key,
 )
 from .models import ChatRequest
@@ -56,6 +57,21 @@ def _map_llm_error(exc: Exception) -> HTTPException:
     if error_name in {"APITimeoutError", "APIConnectionError"}:
         return _http_error(504, "LLM upstream service timed out or is unreachable")
     return _http_error(502, f"LLM upstream service error: {detail}")
+
+
+def _resolve_chat_api_key(req: ChatRequest, x_api_key: str | None) -> str:
+    header_key = (x_api_key or "").strip()
+    if header_key:
+        return header_key
+
+    body_key = (req.api_key or "").strip()
+    if body_key:
+        return body_key
+
+    try:
+        return get_deepseek_api_key()
+    except ValueError as exc:
+        raise _http_error(500, str(exc)) from exc
 
 
 @router.post("/api/internal/embed")
@@ -104,9 +120,10 @@ async def internal_embed(req: EmbedRequest):
 
 
 @router.post("/api/chat")
-async def chat_stream(req: ChatRequest):
+async def chat_stream(req: ChatRequest, x_api_key: str = Header(default=None)):
+    resolved_api_key = _resolve_chat_api_key(req, x_api_key)
     client = AsyncOpenAI(
-        api_key=req.api_key,
+        api_key=resolved_api_key,
         base_url=DEEPSEEK_BASE_URL,
         max_retries=REQUEST_RETRY_COUNT,
         timeout=CHAT_STREAM_READ_TIMEOUT,
@@ -114,13 +131,20 @@ async def chat_stream(req: ChatRequest):
     messages = _build_chat_messages(req)
 
     try:
+        chat_kwargs = {
+            "model": req.model,
+            "messages": messages,
+            "stream": True,
+            "temperature": req.temperature,
+            "top_p": req.top_p,
+            "stream_options": {"include_usage": True},
+        }
+        if req.thinking:
+            chat_kwargs["reasoning_effort"] = req.reasoning_effort
+            chat_kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
+
         stream = await client.chat.completions.create(
-            model=req.model,
-            messages=messages,
-            stream=True,
-            temperature=req.temperature,
-            top_p=req.top_p,
-            stream_options={"include_usage": True},
+            **chat_kwargs,
         )
     except Exception as exc:
         raise _map_llm_error(exc) from exc

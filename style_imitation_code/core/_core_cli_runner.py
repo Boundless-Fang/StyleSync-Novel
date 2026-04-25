@@ -52,7 +52,7 @@ def safe_run_app(app_class, headless_func, **headless_kwargs):
     parser = argparse.ArgumentParser()
     parser.add_argument("--target_file", type=str, default="")
     parser.add_argument("--project", type=str, default="")
-    parser.add_argument("--model", type=str, default="deepseek-chat")
+    parser.add_argument("--model", type=str, default="deepseek-v4-flash")
     parser.add_argument("--character", type=str, default="")
     parser.add_argument("--mode", type=str, default="")
     parser.add_argument("--json_data", type=str, default="")

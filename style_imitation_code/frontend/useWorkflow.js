@@ -1,4 +1,7 @@
 const { ref, computed, watch } = Vue;
+import { notifyInfo } from './notify.js';
+
+const alert = notifyInfo;
 
 export function useWorkflow(projectModule) {
     const references = ref([]);
@@ -29,11 +32,24 @@ export function useWorkflow(projectModule) {
     );
 
     const workflowProjectScript = ref("f5b");
-    const workflowProjectModel = ref("deepseek-chat");
+    const workflowProjectModel = ref("deepseek-v4-flash");
+    const workflowProjectThinking = ref(false);
+    const workflowProjectReasoningEffort = ref("high");
     const workflowStyleScript = ref("f1a");
-    const workflowStyleModel = ref("deepseek-chat");
+    const workflowStyleModel = ref("deepseek-v4-flash");
+    const workflowStyleThinking = ref(false);
+    const workflowStyleReasoningEffort = ref("high");
     const injectF5bPromptToWorkspaceOnRun = ref(false);
     const f5bPromptOnlyMode = ref(false);
+    const f5cMode = ref("prefix");
+    const f5cPrefixBoundary = ref(null);
+    const f5cFimDraftStart = ref(null);
+    const f5cFimRange = ref({ start: null, end: null });
+    const f5cHistory = ref([]);
+    const f5cIsGenerating = ref(false);
+    const f5cPreviewContent = ref("");
+    const f5cGeneratedContent = ref("");
+    const f5cPromptPath = ref("");
 
     const recommendedChars = ref([]);
     const freqChars = ref([]);
@@ -58,27 +74,28 @@ export function useWorkflow(projectModule) {
     const showF5aAdvanced = ref(false);
     const createF5aStructureStage = () => ({
         content: "",
-        ban: "无",
-        narrative: "顺叙",
+        ban: "无指定",
+        narrative: "无指定",
         depiction: [],
-        drive: "场景",
+        drive: "无指定",
         word_ratio: "",
-        reveal: "无",
-        foreshadowing: "无",
+        reveal: "无指定",
+        foreshadowing: "无指定",
     });
 
     const workflowF5aPosition = ref({
-        event_stage: "事件推进",
-        novel_stage: "中期",
-        chapter_functions: ["主线推进"],
+        event_stage: "无指定",
+        novel_stage: "无指定",
+        chapter_functions: [],
         boundary: "",
-        person: "有限第三人称",
-        perspective: "中立视角",
+        person: "无指定",
+        perspective: "无指定",
         characters: "",
-        target_words: "3000字左右",
-        scene_switch: "一次",
-        pace: "中",
-        ban: "无",
+        target_words: "",
+        scene_switch: "无指定",
+        narrative: "无指定",
+        pace: "无指定",
+        ban: "无指定",
     });
 
     const workflowF5aStructure = ref({
@@ -100,7 +117,7 @@ export function useWorkflow(projectModule) {
         "设定展开",
         "情绪过渡",
     ];
-    const f5aNarrativeOptions = ["顺叙", "插叙", "倒叙", "补叙", "双线"];
+    const f5aNarrativeOptions = ["无指定", "顺叙", "倒叙", "插叙", "补叙", "分叙"];
     const f5aDepictionOptions = [
         "对话与互动",
         "叙事与动作",
@@ -108,8 +125,9 @@ export function useWorkflow(projectModule) {
         "解释与说明",
         "环境与外貌",
     ];
-    const f5aDriveOptions = ["场景", "动作", "对话", "反应", "说明", "心理", "外貌"];
+    const f5aDriveOptions = ["无指定", "场景", "动作", "对话", "反应", "说明", "心理", "外貌"];
     const f5aRevealOptions = [
+        "无指定",
         "无",
         "直接揭示",
         "延迟揭示",
@@ -157,6 +175,46 @@ export function useWorkflow(projectModule) {
             .map((item) => item.trim())
             .filter(Boolean);
 
+    const splitParagraphs = (content) => {
+        const normalized = String(content || "").replace(/\r\n/g, "\n").trim();
+        if (!normalized) return [];
+        const hasBlankLine = /\n\s*\n/.test(normalized);
+        const splitter = hasBlankLine ? /\n\s*\n+/ : /\n+/;
+        return normalized
+            .split(splitter)
+            .map((item) => item.trim())
+            .filter(Boolean);
+    };
+
+    const joinParagraphs = (paragraphs) =>
+        paragraphs.map((item) => String(item || "").trim()).filter(Boolean).join("\n\n");
+
+    const f5cParagraphs = computed(() => splitParagraphs(projectModule.editorContent.value));
+    const f5cHasPreview = computed(() => Boolean(f5cPreviewContent.value.trim()));
+    const f5cSelectionSummary = computed(() => {
+        const total = f5cParagraphs.value.length;
+        if (!total) return "当前章节暂无可编辑段落。";
+
+        if (f5cMode.value === "prefix") {
+            if (f5cPrefixBoundary.value === null) {
+                return `保留前缀：无；改写范围：第 1-${total} 段`;
+            }
+            const keptPrefix = f5cPrefixBoundary.value > 0 ? `第 1-${f5cPrefixBoundary.value} 段` : "无";
+            return `保留前缀：${keptPrefix}；改写范围：第 ${f5cPrefixBoundary.value + 1}-${total} 段`;
+        }
+
+        if (f5cFimDraftStart.value !== null) {
+            return `已选择修改区起点：第 ${f5cFimDraftStart.value + 1} 段；请再单击一个段落作为终点。`;
+        }
+        if (f5cFimRange.value.start === null || f5cFimRange.value.end === null) {
+            return "保留前后缀：全部；修改区：未选择";
+        }
+        const { start, end } = f5cFimRange.value;
+        const prefixText = start > 0 ? `第 1-${start} 段` : "无";
+        const suffixText = end < total - 1 ? `第 ${end + 2}-${total} 段` : "无";
+        return `保留前缀：${prefixText}；修改区：第 ${start + 1}-${end + 1} 段；保留后缀：${suffixText}`;
+    });
+
     const handleApiResponse = async (res) => {
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
@@ -171,6 +229,168 @@ export function useWorkflow(projectModule) {
         return data;
     };
 
+    const appendReasoningParams = (url, thinking, reasoningEffort) => {
+        const params = new URLSearchParams();
+        params.set("thinking", thinking ? "true" : "false");
+        if (thinking) {
+            params.set("reasoning_effort", reasoningEffort || "high");
+        }
+        const joiner = url.includes("?") ? "&" : "?";
+        return `${url}${joiner}${params.toString()}`;
+    };
+
+    const buildReasoningPayload = (thinking, reasoningEffort) => ({
+        thinking,
+        reasoning_effort: reasoningEffort || "high",
+    });
+
+    const snapshotF5cState = () => ({
+        mode: f5cMode.value,
+        prefixBoundary: f5cPrefixBoundary.value,
+        fimDraftStart: f5cFimDraftStart.value,
+        fimRange: { ...f5cFimRange.value },
+    });
+
+    const pushF5cHistory = () => {
+        f5cHistory.value.push(snapshotF5cState());
+        if (f5cHistory.value.length > 20) f5cHistory.value.shift();
+    };
+
+    const clearF5cPreview = () => {
+        f5cPreviewContent.value = "";
+        f5cGeneratedContent.value = "";
+        f5cPromptPath.value = "";
+    };
+
+    const resetF5cSelection = () => {
+        f5cPrefixBoundary.value = null;
+        f5cFimDraftStart.value = null;
+        f5cFimRange.value = { start: null, end: null };
+        f5cHistory.value = [];
+        clearF5cPreview();
+    };
+
+    const undoF5cSelection = () => {
+        const prev = f5cHistory.value.pop();
+        if (!prev) return;
+        f5cMode.value = prev.mode;
+        f5cPrefixBoundary.value = prev.prefixBoundary;
+        f5cFimDraftStart.value = prev.fimDraftStart;
+        f5cFimRange.value = { ...prev.fimRange };
+        clearF5cPreview();
+    };
+
+    const clearF5cSelection = () => {
+        resetF5cSelection();
+    };
+
+    const getF5cParagraphStatus = (index) => {
+        if (f5cMode.value === "prefix") {
+            if (f5cPrefixBoundary.value === null) return "modify";
+            return index < f5cPrefixBoundary.value ? "keep" : "modify";
+        }
+
+        if (f5cFimDraftStart.value === index) return "draft";
+        const { start, end } = f5cFimRange.value;
+        if (start === null || end === null) return "keep";
+        return index >= start && index <= end ? "modify" : "keep";
+    };
+
+    const handleF5cParagraphClick = (index) => {
+        if (index < 0 || index >= f5cParagraphs.value.length) return;
+        pushF5cHistory();
+        clearF5cPreview();
+
+        if (f5cMode.value === "prefix") {
+            f5cPrefixBoundary.value = index;
+            return;
+        }
+
+        if (f5cFimDraftStart.value !== null) {
+            const start = Math.min(f5cFimDraftStart.value, index);
+            const end = Math.max(f5cFimDraftStart.value, index);
+            f5cFimRange.value = { start, end };
+            f5cFimDraftStart.value = null;
+            return;
+        }
+
+        f5cFimRange.value = { start: null, end: null };
+        f5cFimDraftStart.value = index;
+    };
+
+    const handleF5cParagraphDoubleClick = (index) => {
+        if (index < 0 || index >= f5cParagraphs.value.length) return;
+        pushF5cHistory();
+        clearF5cPreview();
+        if (f5cMode.value === "prefix") {
+            f5cPrefixBoundary.value = null;
+            return;
+        }
+        f5cFimDraftStart.value = null;
+        f5cFimRange.value = { start: null, end: null };
+    };
+
+    const buildF5cPayload = () => {
+        const paragraphs = f5cParagraphs.value;
+        if (!paragraphs.length) {
+            throw new Error("当前章节没有可供改写的正文内容。");
+        }
+
+        if (f5cMode.value === "prefix") {
+            const boundary = f5cPrefixBoundary.value;
+            const prefixParagraphs = boundary === null ? [] : paragraphs.slice(0, boundary);
+            const rewriteParagraphs = boundary === null ? paragraphs : paragraphs.slice(boundary);
+            if (!rewriteParagraphs.length) {
+                throw new Error("当前选择下没有可改写的正文段落。");
+            }
+            return {
+                mode: "prefix",
+                prefix_text: joinParagraphs(prefixParagraphs),
+                suffix_text: "",
+                selected_text: joinParagraphs(rewriteParagraphs),
+            };
+        }
+
+        const { start, end } = f5cFimRange.value;
+        if (start === null || end === null) {
+            throw new Error("请先单击两次，选择一个连续的中间改写区。");
+        }
+
+        return {
+            mode: "fim",
+            prefix_text: joinParagraphs(paragraphs.slice(0, start)),
+            suffix_text: joinParagraphs(paragraphs.slice(end + 1)),
+            selected_text: joinParagraphs(paragraphs.slice(start, end + 1)),
+        };
+    };
+
+    watch(f5cMode, () => {
+        resetF5cSelection();
+    });
+
+    watch(
+        () => workflowProjectScript.value,
+        (value) => {
+            if (value !== "f5c") {
+                resetF5cSelection();
+            }
+        }
+    );
+
+    watch(
+        () => workflowChapterSelect.value,
+        async (value) => {
+            if (workflowProjectScript.value !== "f5c") return;
+            if (!value || !projectModule.currentProject.value) return;
+            const normalized = `${value.replace(".txt", "")}.txt`;
+            if (projectModule.currentChapter.value !== normalized) {
+                projectModule.currentChapter.value = normalized;
+                await projectModule.fetchContent();
+            }
+            resetF5cSelection();
+        }
+    );
+
     const pollTasks = async () => {
         try {
             const res = await fetch("/api/tasks");
@@ -184,6 +404,63 @@ export function useWorkflow(projectModule) {
         }
     };
     setInterval(pollTasks, 2000);
+
+    const discardF5cPreview = () => {
+        clearF5cPreview();
+    };
+
+    const applyF5cOverwrite = async () => {
+        if (!f5cHasPreview.value) return;
+        const chapterName = workflowChapterName.value.trim();
+        if (!projectModule.currentProject.value || !chapterName) return;
+
+        const res = await fetch(
+            `/api/projects/${projectModule.currentProject.value}/chapters/${chapterName}/content`,
+            {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ content: f5cPreviewContent.value }),
+            }
+        );
+        await handleApiResponse(res);
+        await projectModule.fetchChapters();
+        projectModule.currentChapter.value = `${chapterName}.txt`;
+        await projectModule.fetchContent();
+        clearF5cPreview();
+        alert("f5c 改写结果已覆盖当前章节。");
+    };
+
+    const applyF5cCopy = async () => {
+        if (!f5cHasPreview.value) return;
+        const chapterName = workflowChapterName.value.trim();
+        if (!projectModule.currentProject.value || !chapterName) return;
+
+        const defaultName = `${chapterName}_rewrite_${new Date().toISOString().slice(11, 19).replace(/:/g, "")}`;
+        const targetName = window.prompt("请输入副本章节名：", defaultName);
+        if (!targetName) return;
+
+        const createRes = await fetch(
+            `/api/projects/${projectModule.currentProject.value}/chapters/${encodeURIComponent(targetName)}`,
+            { method: "POST" }
+        );
+        await handleApiResponse(createRes);
+
+        const saveRes = await fetch(
+            `/api/projects/${projectModule.currentProject.value}/chapters/${encodeURIComponent(targetName)}/content`,
+            {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ content: f5cPreviewContent.value }),
+            }
+        );
+        await handleApiResponse(saveRes);
+
+        await projectModule.fetchChapters();
+        projectModule.currentChapter.value = `${targetName}.txt`;
+        await projectModule.fetchContent();
+        clearF5cPreview();
+        alert("f5c 改写结果已保存为新副本。");
+    };
 
     const loadReferences = async () => {
         const res = await fetch("/api/references");
@@ -478,13 +755,13 @@ export function useWorkflow(projectModule) {
     const buildF5aPayload = () => {
         const cleanStage = (stage) => ({
             content: stage.content.trim(),
-            ban: (stage.ban || "无").trim() || "无",
-            narrative: stage.narrative,
+            ban: (stage.ban || "无指定").trim() || "无指定",
+            narrative: stage.narrative || "无指定",
             depiction: stage.depiction,
-            drive: stage.drive,
+            drive: stage.drive || "无指定",
             word_ratio: stage.word_ratio.trim(),
-            reveal: stage.reveal,
-            foreshadowing: (stage.foreshadowing || "无").trim() || "无",
+            reveal: stage.reveal || "无指定",
+            foreshadowing: (stage.foreshadowing || "无指定").trim() || "无指定",
         });
 
         return {
@@ -498,8 +775,9 @@ export function useWorkflow(projectModule) {
             characters: normalizeCommaSeparatedInput(workflowF5aPosition.value.characters),
             target_words: workflowF5aPosition.value.target_words.trim(),
             scene_switch: workflowF5aPosition.value.scene_switch,
+            narrative: workflowF5aPosition.value.narrative,
             pace: workflowF5aPosition.value.pace,
-            ban: (workflowF5aPosition.value.ban || "无").trim() || "无",
+            ban: (workflowF5aPosition.value.ban || "无指定").trim() || "无指定",
             structure: {
                 opening: cleanStage(workflowF5aStructure.value.opening),
                 buildup: cleanStage(workflowF5aStructure.value.buildup),
@@ -623,7 +901,11 @@ export function useWorkflow(projectModule) {
             const chapter = workflowChapterName.value.trim();
             if (!chapter) return;
 
-            const url = `/api/scripts/f7?project_name=${encodeURIComponent(curProj)}&model=${workflowProjectModel.value}&chapter_name=${encodeURIComponent(chapter)}`;
+            const url = appendReasoningParams(
+                `/api/scripts/f7?project_name=${encodeURIComponent(curProj)}&model=${workflowProjectModel.value}&chapter_name=${encodeURIComponent(chapter)}`,
+                workflowProjectThinking.value,
+                workflowProjectReasoningEffort.value
+            );
             const res = await fetch(url, { method: "POST" });
             const data = await handleApiResponse(res);
             if (data.task_id) {
@@ -646,6 +928,10 @@ export function useWorkflow(projectModule) {
                         target_file: selectedReference.value || "",
                         model: workflowProjectModel.value,
                         form_data: formData,
+                        ...buildReasoningPayload(
+                            workflowProjectThinking.value,
+                            workflowProjectReasoningEffort.value
+                        ),
                     }),
                 });
                 const data = await handleApiResponse(res);
@@ -677,6 +963,10 @@ export function useWorkflow(projectModule) {
                         chapter_name: outlineChapterName,
                         chapter_brief: buildF5aPayload(),
                         model: workflowProjectModel.value,
+                        ...buildReasoningPayload(
+                            workflowProjectThinking.value,
+                            workflowProjectReasoningEffort.value
+                        ),
                     }),
                 });
                 const data = await handleApiResponse(res);
@@ -714,6 +1004,10 @@ export function useWorkflow(projectModule) {
                         project_name: curProj,
                         chapter_name: chapterName,
                         model: workflowProjectModel.value,
+                        ...buildReasoningPayload(
+                            workflowProjectThinking.value,
+                            workflowProjectReasoningEffort.value
+                        ),
                     }),
                 });
                 const data = await handleApiResponse(res);
@@ -741,11 +1035,62 @@ export function useWorkflow(projectModule) {
             return;
         }
 
+        if (workflowProjectScript.value === "f5c") {
+            const chapterName = workflowChapterName.value.trim();
+            if (!chapterName) {
+                alert("请先选择一个现有章节。");
+                return;
+            }
+
+            try {
+                const normalized = `${chapterName.replace(".txt", "")}.txt`;
+                if (projectModule.currentChapter.value !== normalized) {
+                    projectModule.currentChapter.value = normalized;
+                    await projectModule.fetchContent();
+                }
+
+                const payload = buildF5cPayload();
+                f5cIsGenerating.value = true;
+                clearF5cPreview();
+
+                const res = await fetch("/api/scripts/f5c_preview", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        project_name: curProj,
+                        chapter_name: chapterName,
+                        original_content: projectModule.editorContent.value,
+                        ...payload,
+                        model: workflowProjectModel.value,
+                        ...buildReasoningPayload(
+                            workflowProjectThinking.value,
+                            workflowProjectReasoningEffort.value
+                        ),
+                    }),
+                });
+                const data = await handleApiResponse(res);
+                f5cPreviewContent.value = data.preview_content || "";
+                f5cGeneratedContent.value = data.generated_content || "";
+                f5cPromptPath.value = data.prompt_path || "";
+                alert("f5c 改写预览已生成，请选择覆盖、舍弃或新建副本。");
+            } catch (e) {
+                alert(`章节改写预览生成失败: ${e.message}`);
+            } finally {
+                f5cIsGenerating.value = false;
+            }
+            return;
+        }
+
         try {
             let url = `/api/scripts/${workflowProjectScript.value}?project_name=${encodeURIComponent(curProj)}&model=${workflowProjectModel.value}`;
             if (workflowProjectScript.value === "f7" && workflowChapterName.value.trim()) {
                 url += `&chapter_name=${encodeURIComponent(workflowChapterName.value.trim())}`;
             }
+            url = appendReasoningParams(
+                url,
+                workflowProjectThinking.value,
+                workflowProjectReasoningEffort.value
+            );
             const res = await fetch(url, { method: "POST" });
             await handleApiResponse(res);
         } catch (e) {
@@ -771,6 +1116,11 @@ export function useWorkflow(projectModule) {
             }
             url += `&character=${encodeURIComponent(workflowCharName.value.trim())}`;
         }
+        url = appendReasoningParams(
+            url,
+            workflowStyleThinking.value,
+            workflowStyleReasoningEffort.value
+        );
 
         try {
             const res = await fetch(url, { method: "POST" });
@@ -879,6 +1229,10 @@ export function useWorkflow(projectModule) {
                     project_name: projectModule.currentProject.value,
                     chapter_name: chapterName,
                     model: workflowProjectModel.value,
+                    ...buildReasoningPayload(
+                        workflowProjectThinking.value,
+                        workflowProjectReasoningEffort.value
+                    ),
                 }),
             });
             const data = await handleApiResponse(res);
@@ -919,10 +1273,22 @@ export function useWorkflow(projectModule) {
         visibleTasks,
         workflowProjectScript,
         workflowProjectModel,
+        workflowProjectThinking,
+        workflowProjectReasoningEffort,
         workflowStyleScript,
         workflowStyleModel,
+        workflowStyleThinking,
+        workflowStyleReasoningEffort,
         injectF5bPromptToWorkspaceOnRun,
         f5bPromptOnlyMode,
+        f5cMode,
+        f5cParagraphs,
+        f5cIsGenerating,
+        f5cPreviewContent,
+        f5cGeneratedContent,
+        f5cPromptPath,
+        f5cHasPreview,
+        f5cSelectionSummary,
         recommendedChars,
         freqChars,
         customCharInput,
@@ -977,5 +1343,13 @@ export function useWorkflow(projectModule) {
         fetchKbContent,
         saveKbContent,
         injectF5bPromptToWorkspace,
+        getF5cParagraphStatus,
+        handleF5cParagraphClick,
+        handleF5cParagraphDoubleClick,
+        undoF5cSelection,
+        clearF5cSelection,
+        discardF5cPreview,
+        applyF5cOverwrite,
+        applyF5cCopy,
     };
 }

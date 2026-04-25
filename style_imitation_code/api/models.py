@@ -2,7 +2,7 @@ from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, field_validator
 
-PROJECT_BRANCHES = {"原创", "original", "同人", "fanfic"}
+PROJECT_BRANCHES = {"原创", "original", "同人", "fanfic", "默认", "default"}
 SETTING_COMPLETION_MODES = {"worldview", "character"}
 SAFE_TEXT_MAX = 20000
 SAFE_NAME_MAX = 120
@@ -41,17 +41,24 @@ class ChatMessage(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    api_key: str = Field(..., min_length=1)
-    model: str = Field(default="deepseek-chat", min_length=1, max_length=100)
+    api_key: str = Field(default="", max_length=200)
+    model: str = Field(default="deepseek-v4-flash", min_length=1, max_length=100)
     messages: List[ChatMessage] = Field(..., min_length=1)
     system_prompt: str = Field(default="", max_length=SAFE_TEXT_MAX)
     temperature: float = Field(default=0.5, ge=0.0, le=2.0)
     top_p: float = Field(default=1.0, gt=0.0, le=1.0)
+    thinking: bool = False
+    reasoning_effort: Literal["high", "max"] = "high"
 
-    @field_validator("api_key", "model")
+    @field_validator("api_key")
+    @classmethod
+    def validate_api_key(cls, value: str) -> str:
+        return _strip_text(value, field_name="api_key", allow_empty=True, max_length=200)
+
+    @field_validator("model")
     @classmethod
     def validate_required_text(cls, value: str, info) -> str:
-        return _strip_text(value, field_name=info.field_name, max_length=100 if info.field_name == "model" else None)
+        return _strip_text(value, field_name=info.field_name, max_length=100)
 
     @field_validator("system_prompt")
     @classmethod
@@ -61,7 +68,7 @@ class ChatRequest(BaseModel):
 
 class ProjectCreate(BaseModel):
     name: str
-    branch: str = "原创"
+    branch: str = "original"
     reference_style: str = ""
 
     @field_validator("name")
@@ -74,13 +81,15 @@ class ProjectCreate(BaseModel):
     def validate_branch(cls, value: str) -> str:
         cleaned = _strip_text(value, field_name="branch", max_length=20).lower()
         branch_map = {
-            "原创": "原创",
-            "original": "原创",
-            "同人": "同人",
-            "fanfic": "同人",
+            "原创": "original",
+            "original": "original",
+            "同人": "fanfic",
+            "fanfic": "fanfic",
+            "默认": "default",
+            "default": "default",
         }
         if cleaned not in PROJECT_BRANCHES:
-            raise ValueError("branch must be one of: 原创/original/同人/fanfic")
+            raise ValueError("branch must be one of: 原创/original/同人/fanfic/默认/default")
         return branch_map[cleaned]
 
     @field_validator("reference_style")
@@ -105,11 +114,20 @@ class ChapterUpdate(BaseModel):
 
 class AppendContent(BaseModel):
     content: str = Field(..., min_length=1, max_length=50000)
+    chapter_name: str = Field(..., min_length=1, max_length=SAFE_NAME_MAX)
 
     @field_validator("content")
     @classmethod
     def validate_content(cls, value: str) -> str:
         return _strip_text(value, field_name="content", max_length=50000)
+
+    @field_validator("chapter_name")
+    @classmethod
+    def validate_chapter_name(cls, value: str) -> str:
+        cleaned = _strip_text(value, field_name="chapter_name", max_length=SAFE_NAME_MAX)
+        if cleaned.endswith(".txt"):
+            cleaned = cleaned[:-4]
+        return _validate_safe_name(cleaned, field_name="chapter_name")
 
 
 class SettingUpdate(BaseModel):
@@ -131,7 +149,9 @@ class SettingCompletionRequest(BaseModel):
     mode: str
     project_name: str = ""
     form_data: Dict[str, Any]
-    model: str = "deepseek-chat"
+    model: str = "deepseek-v4-flash"
+    thinking: bool = False
+    reasoning_effort: Literal["high", "max"] = "high"
 
     @field_validator("target_file")
     @classmethod
@@ -170,7 +190,9 @@ class ChapterOutlineRequest(BaseModel):
     project_name: str
     chapter_name: str
     chapter_brief: Union[str, Dict[str, Any]]
-    model: str = "deepseek-chat"
+    model: str = "deepseek-v4-flash"
+    thinking: bool = False
+    reasoning_effort: Literal["high", "max"] = "high"
 
     @field_validator("project_name", "chapter_name")
     @classmethod
@@ -197,12 +219,43 @@ class ChapterOutlineRequest(BaseModel):
 class NovelGenerationRequest(BaseModel):
     project_name: str
     chapter_name: str
-    model: str = "deepseek-chat"
+    model: str = "deepseek-v4-flash"
+    thinking: bool = False
+    reasoning_effort: Literal["high", "max"] = "high"
 
     @field_validator("project_name", "chapter_name")
     @classmethod
     def validate_names(cls, value: str, info) -> str:
         return _validate_safe_name(value, field_name=info.field_name)
+
+    @field_validator("model")
+    @classmethod
+    def validate_model(cls, value: str) -> str:
+        return _strip_text(value, field_name="model", max_length=100)
+
+
+class ChapterRewriteRequest(BaseModel):
+    project_name: str
+    chapter_name: str
+    mode: Literal["prefix", "fim"]
+    original_content: str = Field(..., max_length=200000)
+    prefix_text: str = Field(default="", max_length=150000)
+    suffix_text: str = Field(default="", max_length=150000)
+    selected_text: str = Field(default="", max_length=150000)
+    model: str = "deepseek-v4-flash"
+    thinking: bool = False
+    reasoning_effort: Literal["high", "max"] = "high"
+
+    @field_validator("project_name", "chapter_name")
+    @classmethod
+    def validate_names(cls, value: str, info) -> str:
+        return _validate_safe_name(value, field_name=info.field_name)
+
+    @field_validator("original_content", "prefix_text", "suffix_text", "selected_text")
+    @classmethod
+    def validate_text_fields(cls, value: str, info) -> str:
+        limit = 200000 if info.field_name == "original_content" else 150000
+        return _strip_text(value, field_name=info.field_name, allow_empty=True, max_length=limit)
 
     @field_validator("model")
     @classmethod

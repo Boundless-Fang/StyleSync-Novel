@@ -1,4 +1,5 @@
 import json
+import os
 import threading
 import time
 
@@ -44,6 +45,30 @@ def _build_headers() -> dict:
     }
 
 
+def _resolve_reasoning_options(thinking=None, reasoning_effort=None):
+    if thinking is None:
+        thinking = (os.environ.get("DEEPSEEK_THINKING") or "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+    else:
+        thinking = bool(thinking)
+
+    effort = (reasoning_effort or os.environ.get("DEEPSEEK_REASONING_EFFORT") or "high").strip().lower()
+    if effort not in {"high", "max"}:
+        effort = "high"
+    return thinking, effort
+
+
+def _apply_reasoning_options(payload: dict, thinking=None, reasoning_effort=None) -> None:
+    enabled, effort = _resolve_reasoning_options(thinking=thinking, reasoning_effort=reasoning_effort)
+    if enabled:
+        payload["thinking"] = {"type": "enabled"}
+        payload["reasoning_effort"] = effort
+
+
 def is_retryable_status(status_code) -> bool:
     return status_code in RETRYABLE_STATUS_CODES
 
@@ -66,6 +91,8 @@ def call_deepseek_api(
     user_prompt,
     model=None,
     temperature=0.5,
+    thinking=None,
+    reasoning_effort=None,
     max_retries=REQUEST_RETRY_COUNT,
 ):
     """
@@ -80,6 +107,7 @@ def call_deepseek_api(
         "temperature": temperature,
         "stream": False,
     }
+    _apply_reasoning_options(payload, thinking=thinking, reasoning_effort=reasoning_effort)
 
     for attempt in range(max_retries):
         stop_event = threading.Event()
@@ -123,11 +151,150 @@ def call_deepseek_api(
             heartbeat_thread.join(timeout=0.1)
 
 
+def call_deepseek_api_with_schema(
+    system_prompt,
+    user_prompt,
+    json_schema,
+    schema_name="structured_output",
+    model=None,
+    temperature=0.5,
+    thinking=None,
+    reasoning_effort=None,
+    max_retries=REQUEST_RETRY_COUNT,
+):
+    payload = {
+        "model": model or get_default_chat_model(),
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": temperature,
+        "stream": False,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": schema_name,
+                "strict": True,
+                "schema": json_schema,
+            },
+        },
+    }
+    _apply_reasoning_options(payload, thinking=thinking, reasoning_effort=reasoning_effort)
+
+    for attempt in range(max_retries):
+        stop_event = threading.Event()
+        start_time = time.time()
+        heartbeat_thread = threading.Thread(
+            target=_heartbeat_worker,
+            args=(stop_event, start_time),
+            daemon=True,
+        )
+        heartbeat_thread.start()
+
+        try:
+            response = requests.post(
+                f"{DEEPSEEK_BASE_URL}/chat/completions",
+                headers=_build_headers(),
+                json=payload,
+                timeout=(CHAT_CONNECT_TIMEOUT, CHAT_READ_TIMEOUT),
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            if "usage" in data:
+                total_tokens = data["usage"].get("total_tokens", 0)
+                print(f"\nTotal Tokens: {total_tokens}", flush=True)
+
+            content = data["choices"][0]["message"]["content"]
+            return json.loads(content)
+        except (requests.exceptions.RequestException, json.JSONDecodeError) as exc:
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            if is_retryable_status(status_code) and attempt < max_retries - 1:
+                sleep_time = 2 ** attempt
+                print(
+                    f"[WARN] Structured LLM request failed with retryable status {status_code}; "
+                    f"retrying in {sleep_time}s...",
+                    flush=True,
+                )
+                time.sleep(sleep_time)
+                continue
+            raise RuntimeError(f"DeepSeek structured request failed after retries: {exc}") from exc
+        finally:
+            stop_event.set()
+            heartbeat_thread.join(timeout=0.1)
+
+
+def call_deepseek_api_json_object(
+    system_prompt,
+    user_prompt,
+    model=None,
+    temperature=0.5,
+    thinking=None,
+    reasoning_effort=None,
+    max_retries=REQUEST_RETRY_COUNT,
+):
+    payload = {
+        "model": model or get_default_chat_model(),
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": temperature,
+        "stream": False,
+        "response_format": {"type": "json_object"},
+    }
+    _apply_reasoning_options(payload, thinking=thinking, reasoning_effort=reasoning_effort)
+
+    for attempt in range(max_retries):
+        stop_event = threading.Event()
+        start_time = time.time()
+        heartbeat_thread = threading.Thread(
+            target=_heartbeat_worker,
+            args=(stop_event, start_time),
+            daemon=True,
+        )
+        heartbeat_thread.start()
+
+        try:
+            response = requests.post(
+                f"{DEEPSEEK_BASE_URL}/chat/completions",
+                headers=_build_headers(),
+                json=payload,
+                timeout=(CHAT_CONNECT_TIMEOUT, CHAT_READ_TIMEOUT),
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            if "usage" in data:
+                total_tokens = data["usage"].get("total_tokens", 0)
+                print(f"\nTotal Tokens: {total_tokens}", flush=True)
+
+            content = data["choices"][0]["message"]["content"]
+            return json.loads(content)
+        except (requests.exceptions.RequestException, json.JSONDecodeError) as exc:
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            if is_retryable_status(status_code) and attempt < max_retries - 1:
+                sleep_time = 2 ** attempt
+                print(
+                    f"[WARN] JSON-object LLM request failed with retryable status {status_code}; "
+                    f"retrying in {sleep_time}s...",
+                    flush=True,
+                )
+                time.sleep(sleep_time)
+                continue
+            raise RuntimeError(f"DeepSeek json_object request failed after retries: {exc}") from exc
+        finally:
+            stop_event.set()
+            heartbeat_thread.join(timeout=0.1)
+
+
 def stream_deepseek_api(
     system_prompt,
     user_prompt,
     model=None,
     temperature=0.5,
+    thinking=None,
+    reasoning_effort=None,
     max_retries=REQUEST_RETRY_COUNT,
 ):
     """
@@ -143,6 +310,7 @@ def stream_deepseek_api(
         "stream": True,
         "stream_options": {"include_usage": True},
     }
+    _apply_reasoning_options(payload, thinking=thinking, reasoning_effort=reasoning_effort)
 
     for attempt in range(max_retries):
         try:

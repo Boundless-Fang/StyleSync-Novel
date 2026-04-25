@@ -1,35 +1,144 @@
 const { ref, computed } = Vue;
+import { notifyInfo } from './notify.js';
+
+const alert = notifyInfo;
 
 export function useChat(config, projectModule, workflowModule) {
     const COMPOSER_FOCUS_EXTRA = 84;
+    const CHAT_STORAGE_KEY = 'styleSyncChats';
+    const CHAT_CURRENT_ID_KEY = 'styleSyncCurrentChatId';
     const DEFAULT_CHAT_PARAMS = {
-        model: 'deepseek-chat',
+        model: 'deepseek-v4-flash',
         systemPrompt: '',
         localForbidden: '',
         temperature: 1.5,
         top_p: 0.9,
+        thinking: false,
+        reasoning_effort: 'high',
         max_tokens: null,
     };
     const getNewChatTemplate = (id, title) => ({
         id,
         title,
+        createdAt: new Date().toISOString(),
         model: DEFAULT_CHAT_PARAMS.model,
         systemPrompt: DEFAULT_CHAT_PARAMS.systemPrompt,
         localForbidden: DEFAULT_CHAT_PARAMS.localForbidden,
         temperature: DEFAULT_CHAT_PARAMS.temperature,
         top_p: DEFAULT_CHAT_PARAMS.top_p,
+        thinking: DEFAULT_CHAT_PARAMS.thinking,
+        reasoning_effort: DEFAULT_CHAT_PARAMS.reasoning_effort,
         max_tokens: DEFAULT_CHAT_PARAMS.max_tokens,
-        stats: { local_hit_count: 0, total_tokens: 0 }, messages: []
+        stats: { local_hit_count: 0, total_tokens: 0 },
+        messages: [],
+        isRenaming: false,
+        renameDraft: title,
     });
 
-    const chats = ref([ getNewChatTemplate('chat_1', '默认对话') ]);
-    const currentChatId = ref('chat_1');
+    const normalizeStoredMessage = (message) => {
+        if (!message || typeof message !== 'object' || !message.role) return null;
+        if (message.role === 'user') {
+            const content = String(message.content || '');
+            return {
+                role: 'user',
+                content,
+                collapsed: Boolean(message.collapsed),
+                isEditing: false,
+                editDraft: content
+            };
+        }
+        if (message.role === 'assistant') {
+            const versions = Array.isArray(message.versions) && message.versions.length
+                ? message.versions.map((item) => ({ content: String(item?.content || '') }))
+                : [{ content: '' }];
+            const maxIndex = versions.length - 1;
+            const activeVersion = Math.min(Math.max(Number(message.active_version) || 0, 0), maxIndex);
+            return {
+                role: 'assistant',
+                versions,
+                active_version: activeVersion,
+                last_scanned_index: 0,
+                matched_indices: new Set()
+            };
+        }
+        return {
+            role: String(message.role),
+            content: String(message.content || '')
+        };
+    };
+
+    const normalizeStoredChat = (chat, index) => {
+        const id = chat?.id || `chat_${Date.now()}_${index}`;
+        const title = String(chat?.title || `对话 ${index + 1}`);
+        const messages = Array.isArray(chat?.messages)
+            ? chat.messages.map(normalizeStoredMessage).filter(Boolean)
+            : [];
+        return {
+            id,
+            title,
+            createdAt: chat?.createdAt || new Date().toISOString(),
+            model: chat?.model || DEFAULT_CHAT_PARAMS.model,
+            systemPrompt: String(chat?.systemPrompt || DEFAULT_CHAT_PARAMS.systemPrompt),
+            localForbidden: String(chat?.localForbidden || DEFAULT_CHAT_PARAMS.localForbidden),
+            temperature: Number(chat?.temperature ?? DEFAULT_CHAT_PARAMS.temperature),
+            top_p: Number(chat?.top_p ?? DEFAULT_CHAT_PARAMS.top_p),
+            thinking: Boolean(chat?.thinking ?? DEFAULT_CHAT_PARAMS.thinking),
+            reasoning_effort: chat?.reasoning_effort || DEFAULT_CHAT_PARAMS.reasoning_effort,
+            max_tokens: chat?.max_tokens ?? DEFAULT_CHAT_PARAMS.max_tokens,
+            stats: {
+                local_hit_count: Number(chat?.stats?.local_hit_count || 0),
+                total_tokens: Number(chat?.stats?.total_tokens || 0),
+            },
+            messages,
+            isRenaming: false,
+            renameDraft: title,
+        };
+    };
+
+    const loadStoredChats = () => {
+        if (typeof localStorage === 'undefined') {
+            return [getNewChatTemplate('chat_1', '默认对话')];
+        }
+        try {
+            const raw = localStorage.getItem(CHAT_STORAGE_KEY);
+            if (!raw) return [getNewChatTemplate('chat_1', '默认对话')];
+            const parsed = JSON.parse(raw);
+            if (!Array.isArray(parsed) || parsed.length === 0) {
+                return [getNewChatTemplate('chat_1', '默认对话')];
+            }
+            return parsed.map(normalizeStoredChat).filter(Boolean);
+        } catch {
+            return [getNewChatTemplate('chat_1', '默认对话')];
+        }
+    };
+
+    const chats = ref(loadStoredChats());
+    const currentChatId = ref(
+        (typeof localStorage !== 'undefined' && localStorage.getItem(CHAT_CURRENT_ID_KEY))
+        || chats.value[0]?.id
+        || 'chat_1'
+    );
     const chatInput = ref('');
     const isGenerating = ref(false);
     const isComposerFocused = ref(false);
     let abortController = null;
 
     const currentChat = computed(() => chats.value.find(c => c.id === currentChatId.value));
+    Vue.watch(
+        chats,
+        (value) => {
+            if (!value.length) {
+                const fallback = getNewChatTemplate('chat_1', '默认对话');
+                chats.value = [fallback];
+                currentChatId.value = fallback.id;
+                return;
+            }
+            if (!value.some((chat) => chat.id === currentChatId.value)) {
+                currentChatId.value = value[0].id;
+            }
+        },
+        { deep: true, immediate: true }
+    );
     const composerHeight = computed(() => {
         const baseHeight = Number(config.value.composerHeight) || 56;
         return isComposerFocused.value ? baseHeight + COMPOSER_FOCUS_EXTRA : baseHeight;
@@ -64,8 +173,53 @@ export function useChat(config, projectModule, workflowModule) {
         const copy = JSON.parse(JSON.stringify(currentChat.value));
         copy.id = newId;
         copy.title += ' (复刻)';
+        copy.createdAt = new Date().toISOString();
+        copy.isRenaming = false;
+        copy.renameDraft = copy.title;
         chats.value.unshift(copy);
         currentChatId.value = newId;
+    };
+
+    const startRenameChat = (chatId) => {
+        const targetChat = chats.value.find((chat) => chat.id === chatId);
+        if (!targetChat) return;
+        targetChat.isRenaming = true;
+        targetChat.renameDraft = targetChat.title;
+    };
+
+    const cancelRenameChat = (chatId) => {
+        const targetChat = chats.value.find((chat) => chat.id === chatId);
+        if (!targetChat) return;
+        targetChat.renameDraft = targetChat.title;
+        targetChat.isRenaming = false;
+    };
+
+    const saveRenameChat = (chatId) => {
+        const targetChat = chats.value.find((chat) => chat.id === chatId);
+        if (!targetChat) return;
+        const nextTitle = String(targetChat.renameDraft || '').trim();
+        if (!nextTitle) return;
+        targetChat.title = nextTitle;
+        targetChat.renameDraft = nextTitle;
+        targetChat.isRenaming = false;
+    };
+
+    const deleteChat = (chatId) => {
+        if (chats.value.length <= 1) return;
+        chats.value = chats.value.filter((chat) => chat.id !== chatId);
+    };
+
+    const formatChatCreatedAt = (value) => {
+        if (!value) return '';
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) return '';
+        return date.toLocaleString('zh-CN', {
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false,
+        });
     };
 
     const clearCurrentChatMessages = () => {
@@ -83,6 +237,8 @@ export function useChat(config, projectModule, workflowModule) {
         currentChat.value.localForbidden = DEFAULT_CHAT_PARAMS.localForbidden;
         currentChat.value.temperature = DEFAULT_CHAT_PARAMS.temperature;
         currentChat.value.top_p = DEFAULT_CHAT_PARAMS.top_p;
+        currentChat.value.thinking = DEFAULT_CHAT_PARAMS.thinking;
+        currentChat.value.reasoning_effort = DEFAULT_CHAT_PARAMS.reasoning_effort;
     };
 
     const scrollToBottom = () => {
@@ -202,40 +358,72 @@ export function useChat(config, projectModule, workflowModule) {
         window.__styleSyncWorkspaceInjectBound = true;
     }
 
-    const sendMessage = async () => {
-        if(!chatInput.value.trim() || isGenerating.value || !currentChat.value) return;
-        if(!config.value.apiKey) { alert('系统阻断：未配置有效 API 凭证。'); return; }
+    const createAssistantMessage = () => ({
+        role: 'assistant',
+        versions: [{ content: '' }],
+        active_version: 0,
+        last_scanned_index: 0,
+        matched_indices: new Set()
+    });
 
-        const userText = chatInput.value.trim();
-        currentChat.value.messages.push({ role: 'user', content: userText });
-        chatInput.value = '';
-        scrollToBottom();
+    const createUserMessage = (content) => ({
+        role: 'user',
+        content,
+        collapsed: true,
+        isEditing: false,
+        editDraft: content
+    });
 
-        const aiMessage = { 
-            role: 'assistant', 
-            versions: [{ content: '' }], 
-            active_version: 0, 
-            last_scanned_index: 0, 
-            matched_indices: new Set() 
-        };
-        
-        currentChat.value.messages.push(aiMessage);
+    const shouldCollapseUserMessage = (content = '') =>
+        String(content).split(/\r?\n/).length > 3;
+
+    const toggleUserMessageCollapse = (messageIndex) => {
+        const targetMessage = currentChat.value?.messages?.[messageIndex];
+        if (!targetMessage || targetMessage.role !== 'user' || !shouldCollapseUserMessage(targetMessage.content)) return;
+        targetMessage.collapsed = !targetMessage.collapsed;
+    };
+
+    const startEditUserMessage = (messageIndex) => {
+        const targetMessage = currentChat.value?.messages?.[messageIndex];
+        if (!targetMessage || targetMessage.role !== 'user') return;
+        targetMessage.editDraft = targetMessage.content;
+        targetMessage.isEditing = true;
+        targetMessage.collapsed = false;
+    };
+
+    const cancelEditUserMessage = (messageIndex) => {
+        const targetMessage = currentChat.value?.messages?.[messageIndex];
+        if (!targetMessage || targetMessage.role !== 'user') return;
+        targetMessage.editDraft = targetMessage.content;
+        targetMessage.isEditing = false;
+    };
+
+    const saveEditUserMessage = (messageIndex) => {
+        const targetMessage = currentChat.value?.messages?.[messageIndex];
+        if (!targetMessage || targetMessage.role !== 'user') return;
+        const nextContent = (targetMessage.editDraft || '').trim();
+        if (!nextContent) return;
+        targetMessage.content = nextContent;
+        targetMessage.editDraft = nextContent;
+        targetMessage.isEditing = false;
+        targetMessage.collapsed = shouldCollapseUserMessage(nextContent);
+    };
+
+    const streamAssistantReply = async (aiMessage, apiMessages) => {
         isGenerating.value = true;
         abortController = new AbortController();
-
-        const apiMessages = currentChat.value.messages.slice(0, -1).map(m => ({
-            role: m.role,
-            content: m.role === 'user' ? m.content : m.versions[m.active_version].content
-        }));
-
+        aiMessage.last_scanned_index = 0;
+        aiMessage.matched_indices = new Set();
         try {
             const payload = {
-                api_key: config.value.apiKey,
+                api_key: config.value.useDefaultApiConfig ? '' : (config.value.apiKey || '').trim(),
                 model: currentChat.value.model,
                 messages: apiMessages,
                 system_prompt: currentChat.value.systemPrompt,
                 temperature: currentChat.value.temperature,
-                top_p: currentChat.value.top_p
+                top_p: currentChat.value.top_p,
+                thinking: currentChat.value.thinking,
+                reasoning_effort: currentChat.value.reasoning_effort
             };
 
             const response = await fetch('/api/chat', {
@@ -292,7 +480,44 @@ export function useChat(config, projectModule, workflowModule) {
             }
         } finally {
             isGenerating.value = false;
+            abortController = null;
         }
+    };
+
+    const sendMessage = async () => {
+        if(!chatInput.value.trim() || isGenerating.value || !currentChat.value) return;
+
+        const userText = chatInput.value.trim();
+        currentChat.value.messages.push(createUserMessage(userText));
+        chatInput.value = '';
+        scrollToBottom();
+
+        const aiMessage = createAssistantMessage();
+        currentChat.value.messages.push(aiMessage);
+
+        const apiMessages = currentChat.value.messages.slice(0, -1).map(m => ({
+            role: m.role,
+            content: m.role === 'user' ? m.content : m.versions[m.active_version].content
+        }));
+
+        await streamAssistantReply(aiMessage, apiMessages);
+    };
+
+    const retryAssistantMessage = async (messageIndex) => {
+        if (isGenerating.value || !currentChat.value) return;
+        const targetMessage = currentChat.value.messages[messageIndex];
+        if (!targetMessage || targetMessage.role !== 'assistant') return;
+
+        targetMessage.versions.push({ content: '' });
+        targetMessage.active_version = targetMessage.versions.length - 1;
+
+        const apiMessages = currentChat.value.messages.slice(0, messageIndex).map(m => ({
+            role: m.role,
+            content: m.role === 'user' ? m.content : m.versions[m.active_version].content
+        }));
+
+        scrollToBottom();
+        await streamAssistantReply(targetMessage, apiMessages);
     };
 
     const renderMarkdown = (text) => {
@@ -305,11 +530,59 @@ export function useChat(config, projectModule, workflowModule) {
         return parsedHtml;
     };
 
+    Vue.watch(
+        chats,
+        (value) => {
+            if (typeof localStorage === 'undefined') return;
+            const serialized = value.map((chat) => ({
+                id: chat.id,
+                title: chat.title,
+                createdAt: chat.createdAt,
+                model: chat.model,
+                systemPrompt: chat.systemPrompt,
+                localForbidden: chat.localForbidden,
+                temperature: chat.temperature,
+                top_p: chat.top_p,
+                thinking: chat.thinking,
+                reasoning_effort: chat.reasoning_effort,
+                max_tokens: chat.max_tokens ?? null,
+                stats: chat.stats,
+                messages: chat.messages.map((message) => {
+                    if (message.role === 'assistant') {
+                        return {
+                            role: 'assistant',
+                            versions: message.versions,
+                            active_version: message.active_version,
+                        };
+                    }
+                    if (message.role === 'user') {
+                        return {
+                            role: 'user',
+                            content: message.content,
+                            collapsed: message.collapsed,
+                        };
+                    }
+                    return message;
+                }),
+            }));
+            localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(serialized));
+        },
+        { deep: true }
+    );
+
+    Vue.watch(currentChatId, (value) => {
+        if (typeof localStorage === 'undefined') return;
+        localStorage.setItem(CHAT_CURRENT_ID_KEY, value || '');
+    });
+
     return {
         chats, currentChatId, currentChat, chatInput, isGenerating, composerHeight,
         quickPromptButtons, lastInjectedLabel, lastInjectedTemplate,
         createNewChat, copyCurrentChat, clearCurrentChatMessages, 
-        sendMessage, stopGeneration, renderMarkdown,
+        sendMessage, retryAssistantMessage, stopGeneration, renderMarkdown,
+        toggleUserMessageCollapse, startEditUserMessage, cancelEditUserMessage, saveEditUserMessage,
+        shouldCollapseUserMessage,
+        startRenameChat, cancelRenameChat, saveRenameChat, deleteChat, formatChatCreatedAt,
         applyQuickPrompt, injectKnowledgeToWorkspace, injectEditorContentToWorkspace,
         handleComposerFocus, handleComposerBlur, resetCurrentChatDefaults
     };

@@ -83,7 +83,7 @@ def test_f5a_outline_creates_task(monkeypatch):
                 "project_name": "demo_project",
                 "chapter_name": "chapter_1",
                 "chapter_brief": "test outline",
-                "model": "deepseek-chat",
+                "model": "deepseek-v4-flash",
             },
         )
         data = response.json()
@@ -100,11 +100,55 @@ def test_f5b_generate_rejects_blank_project_name():
         json={
             "project_name": "   ",
             "chapter_name": "chapter_1",
-            "model": "deepseek-chat",
+            "model": "deepseek-v4-flash",
         },
     )
 
     assert response.status_code == 422
+
+
+def test_f5c_preview_returns_generated_content(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        fake_code_dir = _prepare_fake_script_dir(
+            Path(tmp_dir), "f5c_llm_chapter_rewrite.py"
+        )
+
+        class FakeRewriteApp:
+            @staticmethod
+            def execute_rewrite_preview(*args, **kwargs):
+                return {
+                    "status": "success",
+                    "mode": "prefix",
+                    "preview_content": "rewritten content",
+                    "generated_content": "rewritten tail",
+                    "prompt_path": "demo.txt",
+                }
+
+        monkeypatch.setattr(routeworkflow, "CODE_DIR", str(fake_code_dir))
+        import types
+
+        fake_module = types.ModuleType("scripts.f5c_llm_chapter_rewrite")
+        fake_module.ChapterRewriteApp = FakeRewriteApp
+        monkeypatch.setitem(sys.modules, "scripts.f5c_llm_chapter_rewrite", fake_module)
+
+        response = client.post(
+            "/api/scripts/f5c_preview",
+            json={
+                "project_name": "demo_project",
+                "chapter_name": "chapter_1",
+                "mode": "prefix",
+                "original_content": "old content",
+                "prefix_text": "prefix",
+                "suffix_text": "",
+                "selected_text": "tail",
+                "model": "deepseek-v4-flash",
+            },
+        )
+        data = response.json()
+
+    assert response.status_code == 200
+    assert data["status"] == "success"
+    assert data["preview_content"] == "rewritten content"
 
 
 def test_f4a_completion_creates_task(monkeypatch):
@@ -125,7 +169,7 @@ def test_f4a_completion_creates_task(monkeypatch):
                 "mode": "worldview",
                 "project_name": "demo_project",
                 "form_data": {"worldview": "test"},
-                "model": "deepseek-chat",
+                "model": "deepseek-v4-flash",
             },
         )
         data = response.json()
@@ -149,7 +193,7 @@ def test_f6_preview_returns_501_when_script_not_implemented(monkeypatch):
             params={
                 "project_name": "demo_project",
                 "chapter_name": "chapter_1",
-                "model": "deepseek-chat",
+                "model": "deepseek-v4-flash",
             },
         )
 
@@ -173,7 +217,7 @@ def test_f7_preview_marks_response_message(monkeypatch):
             params={
                 "project_name": "demo_project",
                 "chapter_name": "chapter_1",
-                "model": "deepseek-chat",
+                "model": "deepseek-v4-flash",
             },
         )
         data = response.json()
@@ -188,7 +232,7 @@ def test_f7_requires_chapter_name():
         params={
             "project_name": "demo_project",
             "chapter_name": "",
-            "model": "deepseek-chat",
+            "model": "deepseek-v4-flash",
         },
     )
 
