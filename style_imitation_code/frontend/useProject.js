@@ -1,4 +1,7 @@
 const { ref } = Vue;
+import { confirmAction, notifyInfo } from './notify.js';
+
+const alert = notifyInfo;
 
 export function useProject() {
     const activeTab = ref('editor');
@@ -52,6 +55,36 @@ export function useProject() {
         } 
         return 999999; 
     }; 
+
+    const toChineseNumber = (num) => {
+        const digits = ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九'];
+        if (!Number.isFinite(num) || num <= 0) return String(num);
+        if (num < 10) return digits[num];
+        if (num < 20) return num === 10 ? '十' : `十${digits[num % 10]}`;
+        if (num < 100) {
+            const tens = Math.floor(num / 10);
+            const ones = num % 10;
+            return `${digits[tens]}十${ones ? digits[ones] : ''}`;
+        }
+        return String(num);
+    };
+
+    const formatChapterLabel = (name) => {
+        const cleanName = name.replace('.txt', '');
+        const legacyMatch = cleanName.match(/^chapter_(\d+)(?:_(.+))?$/i);
+        if (legacyMatch) {
+            const chapterNum = parseInt(legacyMatch[1], 10);
+            const suffix = legacyMatch[2] ? `_${legacyMatch[2]}` : '';
+            return `第${toChineseNumber(chapterNum)}章${suffix}`;
+        }
+        const arabicChapterMatch = cleanName.match(/^第(\d+)章(?:_(.+))?$/);
+        if (arabicChapterMatch) {
+            const chapterNum = parseInt(arabicChapterMatch[1], 10);
+            const suffix = arabicChapterMatch[2] ? `_${arabicChapterMatch[2]}` : '';
+            return `第${toChineseNumber(chapterNum)}章${suffix}`;
+        }
+        return cleanName;
+    };
 
     const fetchProjectCharacters = async () => { 
         if(!currentProject.value) return; 
@@ -132,7 +165,7 @@ export function useProject() {
     }; 
 
     const confirmCreateChapter = async (forceOverwrite = false) => { 
-        let finalName = `第${newChapterNum.value}章`; 
+        let finalName = `第${toChineseNumber(newChapterNum.value)}章`; 
         if (newChapterTitle.value.trim()) { 
             finalName += `_${newChapterTitle.value.trim()}`; 
         } 
@@ -149,7 +182,7 @@ export function useProject() {
             if (res.status === 409) { 
                 const errorData = await res.json(); 
                 if (errorData.detail === "FILE_EXISTS") { 
-                    if (window.confirm(`章节 [${finalName}] 已存在，是否强制覆盖原文件？\n警告：此操作不可逆！`)) { 
+                    if (confirmAction(`章节 [${finalName}] 已存在，是否强制覆盖原文件？\n警告：此操作不可逆！`)) {
                         return await confirmCreateChapter(true); 
                     } else { 
                         return null; 
@@ -181,7 +214,7 @@ export function useProject() {
             if (res.status === 409) { 
                 const errorData = await res.json(); 
                 if (errorData.detail === "FILE_EXISTS") { 
-                    if (window.confirm(`目标章节名 [${newName}] 已被占用，是否强制覆盖该文件？\n警告：被覆盖的章节数据将永久丢失！`)) { 
+                    if (confirmAction(`目标章节名 [${newName}] 已被占用，是否强制覆盖该文件？\n警告：被覆盖的章节数据将永久丢失！`)) {
                         await executeRename(oldName, newName, true); 
                     } 
                     return; 
@@ -208,20 +241,34 @@ export function useProject() {
     }; 
 
     const importToNovel = async (text) => {
-        if(!currentProject.value) return;
+        if(!currentProject.value || !currentChapter.value) return;
         try {
-            await fetch(`/api/projects/${currentProject.value}/append`, {
+            const res = await fetch(`/api/projects/${currentProject.value}/append`, {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ content: text })
+                body: JSON.stringify({ content: text, chapter_name: currentChapter.value })
             });
+            if (res.status === 404) {
+                const errorData = await res.json();
+                if (errorData.detail === "CHAPTER_NOT_FOUND") {
+                    alert('当前章节不存在，请先确认目标章节后再导入。');
+                    return;
+                }
+            }
+            if (!res.ok) {
+                throw new Error('导入失败');
+            }
             if(activeTab.value === 'editor') fetchContent();
             alert('导入已执行。');
         } catch(e) { alert('数据流追加引发异常。'); }
     };
 
-    const createProject = async () => {
+    const createProject = async (forceOverwrite = false) => {
         const targetName = projectActionMode.value === 'create' ? newProjectName.value : existingProjectSelect.value;
-        await fetch('/api/projects', {
+        let url = '/api/projects';
+        if (forceOverwrite) {
+            url += '?force_overwrite=true';
+        }
+        const res = await fetch(url, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ 
                 name: targetName,
@@ -229,8 +276,21 @@ export function useProject() {
                 reference_style: newProjectReferenceStyle.value
             })
         });
+        if (res.status === 409) {
+            const errorData = await res.json();
+            if (errorData.detail === "PROJECT_EXISTS") {
+                if (confirmAction('项目名称已存在，是否强制覆盖？\n警告：现有项目内容将被删除并重新初始化。')) {
+                    return await createProject(true);
+                }
+                return;
+            }
+        }
+        if (!res.ok) {
+            alert('创建项目失败，请稍后重试。');
+            return;
+        }
         newProjectName.value = '';
-        alert('底层工程目录及配置文件建立或覆盖完毕。');
+        alert(forceOverwrite ? '项目已强制覆盖并重新初始化。' : '项目已创建，底层工程目录及配置文件已初始化。');
         await loadProjects();
         currentProject.value = projects.value.find(p => p.startsWith(targetName)) || projects.value[projects.value.length - 1];
         activeTab.value = 'editor';
@@ -241,6 +301,7 @@ export function useProject() {
         projectActionMode, newProjectName, existingProjectSelect, newProjectBranch, newProjectReferenceStyle, availableStyles,
         showChapterModal, newChapterNum, newChapterTitle, projectCharacters,
         loadProjects, loadStyles, fetchChapters, fetchContent, debouncedSave, fetchProjectCharacters, 
+        formatChapterLabel,
         openCreateModal, confirmCreateChapter, renameChapter, importToNovel, createProject
     };
 }

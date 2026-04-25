@@ -1,4 +1,4 @@
-import json
+﻿import json
 import os
 import shutil
 from datetime import datetime
@@ -13,6 +13,7 @@ router = APIRouter()
 
 FANFIC_MODES = {"同人", "fanfic"}
 ORIGINAL_MODES = {"原创", "original"}
+DEFAULT_MODES = {"默认", "default"}
 
 
 def get_real_dir(proj_name: str):
@@ -109,6 +110,13 @@ def init_original_project(target_proj_dir: str, src_style_dir: str) -> None:
     open(world_settings_path, "w", encoding="utf-8").close()
 
 
+def init_default_project(target_proj_dir: str) -> None:
+    for filename in ["features.md", "world_settings.md", "positive_words.md", "negative_words.md"]:
+        file_path = os.path.join(target_proj_dir, filename)
+        if not os.path.exists(file_path):
+            open(file_path, "w", encoding="utf-8").close()
+
+
 def ensure_required_files(target_proj_dir: str) -> None:
     required_files = [
         "features.md",
@@ -121,7 +129,7 @@ def ensure_required_files(target_proj_dir: str) -> None:
         if not os.path.exists(file_path):
             open(file_path, "w", encoding="utf-8").close()
 
-    first_chapter_path = os.path.join(target_proj_dir, "content", "chapter_1.txt")
+    first_chapter_path = os.path.join(target_proj_dir, "content", "第一章.txt")
     with open(first_chapter_path, "w", encoding="utf-8") as file:
         file.write("这里是小说的开头……")
 
@@ -139,18 +147,25 @@ async def get_styles():
 
 
 @router.post("/api/projects")
-async def create_project(proj: ProjectCreate):
+async def create_project(proj: ProjectCreate, force_overwrite: bool = False):
     dir_name = build_project_name(proj.name)
     target_proj_dir = os.path.join(PROJ_DIR, dir_name)
     src_style_dir = os.path.join(STYLE_DIR, proj.reference_style) if proj.reference_style else None
 
+    if os.path.exists(target_proj_dir) and not force_overwrite:
+        raise HTTPException(status_code=409, detail="PROJECT_EXISTS")
+
     def _execute_project_initialization():
+        if os.path.exists(target_proj_dir) and force_overwrite:
+            shutil.rmtree(target_proj_dir)
         init_project_structure(target_proj_dir, proj)
 
         if proj.branch in FANFIC_MODES:
             init_fanfic_project(target_proj_dir, src_style_dir)
         elif proj.branch in ORIGINAL_MODES:
             init_original_project(target_proj_dir, src_style_dir)
+        elif proj.branch in DEFAULT_MODES:
+            init_default_project(target_proj_dir)
         else:
             raise ValueError(f"不支持的项目模式: {proj.branch}")
 
@@ -269,11 +284,10 @@ async def append_to_novel(proj_name: str, req: AppendContent):
     if not os.path.exists(content_dir):
         raise HTTPException(status_code=404, detail="未找到章节内容目录")
 
-    chapters = [f for f in os.listdir(content_dir) if f.endswith(".txt")]
-    if not chapters:
-        raise HTTPException(status_code=404, detail="未找到章节文件")
+    target_file = get_validated_target_path(proj_name, f"content/{req.chapter_name}.txt")
+    if not os.path.exists(target_file):
+        raise HTTPException(status_code=404, detail="CHAPTER_NOT_FOUND")
 
-    target_file = os.path.join(content_dir, chapters[0])
     try:
         await async_append_text(target_file, "\n\n" + req.content)
         return {"status": "success"}

@@ -108,7 +108,7 @@ class ExclusiveVocabApp(HeadlessBaseTask):
             traceback.print_exc()
             return False
 
-def run_headless(target_file, project_name=None, model="deepseek-chat"):
+def run_headless(target_file, project_name=None, model="deepseek-v4-flash"):
     import sys
     if os.path.isabs(target_file):
         original_path = target_file

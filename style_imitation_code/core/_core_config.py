@@ -19,7 +19,7 @@ from paths_config import (
 REFERENCE_DIR = REF_DIR
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-DEFAULT_CHAT_MODEL = "deepseek-chat"
+DEFAULT_CHAT_MODEL = "deepseek-v4-flash"
 DEFAULT_EMBEDDING_MODEL = "BAAI/bge-m3"
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 SILICONFLOW_EMBEDDING_URL = "https://api.siliconflow.cn/v1/embeddings"

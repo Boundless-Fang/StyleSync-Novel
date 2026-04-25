@@ -2,42 +2,47 @@ import os
 import shutil
 
 from core._core_cli_runner import safe_run_app, inject_env, HeadlessBaseTask
+
 inject_env()
 
-from core._core_config import BASE_DIR, PROJECT_ROOT, REFERENCE_DIR, STYLE_DIR, PROJ_DIR
+from core._core_config import REFERENCE_DIR, STYLE_DIR, PROJ_DIR
 from core._core_utils import smart_read_text, atomic_write
 from core._core_llm import call_deepseek_api
 
-class StyleAnalysisApp(HeadlessBaseTask):
-    def __init__(self):
-        super().__init__()
 
-    def execute_logic(self):
-        pass # 此方法已完全交由 Web API 层通过 run_headless 静默执行
+STRUCTURED_SUMMARY_PROMPT = """请先输出一个固定格式的 Markdown 结构化摘要，标题必须为“零、结构化摘要”。
 
-    @staticmethod
-    def execute_analysis(original_path, model, log_func, project_name=None):
-        novel_name = os.path.splitext(os.path.basename(original_path))[0]
-        try:
-            original_text = smart_read_text(original_path, max_len=50000)
-        except Exception as e:
-            log_func(f"读取文件失败: {e}")
-            return False
+其中字段必须按以下顺序出现，不允许缺项，不允许改名：
+- 叙事节奏：
+- 语体色彩：
+- 人称视角：
+- 句子长度：
+- 段落长度：
+- 表达方式主导：
+- 叙事语调标签：
+- 叙事语调说明：
+- 描写风格标签：
+- 描写风格说明：
+- 心理呈现方式：
+- 对话处理方式：
+- 标点习惯：
+- 表现手法偏好：
+- 描写角度偏好：
+- 修辞手法偏好：
+- 外貌描写偏好：
+- 动作描写偏好：
+- 对话/心理偏好：
 
-        try:
-            style_dir = os.path.join(STYLE_DIR, f"{novel_name}_style_imitation")
-            os.makedirs(style_dir, exist_ok=True)
-            save_path = os.path.join(style_dir, "features.md")
-            
-            project_save_path = None
-            if project_name:
-                project_dir = os.path.join(PROJ_DIR, project_name)
-                os.makedirs(project_dir, exist_ok=True)
-                project_save_path = os.path.join(project_dir, "features.md")
+字段填写要求：
+1. “叙事节奏 / 语体色彩 / 人称视角 / 句子长度 / 段落长度”优先使用候选分类词填写。
+2. “表达方式主导 / 叙事语调标签 / 描写风格标签 / 心理呈现方式 / 对话处理方式 / 标点习惯 / 表现手法偏好 / 描写角度偏好 / 修辞手法偏好 / 外貌描写偏好 / 动作描写偏好 / 对话/心理偏好”允许填写 1-3 个标签，多个标签之间使用“ / ”分隔。
+3. “叙事语调说明”和“描写风格说明”各写 1-2 句简短说明，不要举剧情，不要出现人物名字。
+4. 如果证据不足，请写“未明显体现”，不要自造概念。
+5. 这一部分的目标是给后续生成链路提供可复用约束，所以优先概括稳定倾向，而不是零散特例。
+"""
 
-            log_func("正在请求 API 进行文风特征动态分析...")
-            
-            prompt_header = """使用严谨客观的语言，按照以下格式总结该小说的行文特点，不要包含具体的剧情内容 and 人物名字，允许分类讨论，比如...：在...时...；在...时...。在有标注“举例”的项目里要附上若干示例。
+
+ORIGINAL_ANALYSIS_PROMPT = """按照以下格式总结该小说的行文特点，不要包含具体的剧情内容和人物名字，允许分类讨论，比如...：在...时...；在...时...。在有标注“举例”的项目里要附上若干示例。
 一、行文风格
 叙事节奏：推进故事发展或展现事件细节的速度等分类：快节奏（动作冲突密集）/慢节奏（侧重心理与环境铺垫）/快慢交替/延宕（在关键节点故意放缓拉扯）等
 语体色彩：文本遣词造句呈现出的整体质感与语言属性等分类：书面典雅（文艺/古风）/通俗易懂/文白混杂等
@@ -59,10 +64,16 @@ class StyleAnalysisApp(HeadlessBaseTask):
 动作偏好：神态、肢体、下意识、细节等（举例）
 对话/心理偏好：网络用语、粗俗用语、特殊称呼、语气词、拟声词等（举例）
 
-【参考原文片段】（前50000字截取）：
+输出要求补充：
+1. 保留上述原有四大部分的顺序和标题，不要删改这些一级标题。
+2. “零、结构化摘要”输出完后，再输出“一、行文风格”到“四、具体内容”的完整分析正文。
+3. 整体输出必须是 Markdown 纯文本，不要输出 JSON，不要加寒暄，不要解释你的分析过程。
+
+【参考原文片段】（前 50000 字截取）：
 """
-            prompt_part_1 = prompt_header + original_text
-            prompt_part_2 = """五、禁止事项
+
+
+FORBIDDEN_APPENDIX = """五、禁止事项
 1.比较定义（是否出现以下句式）：
 “与其说……不如说……”
 “（仿佛）不是A，而是B”
@@ -89,31 +100,74 @@ class StyleAnalysisApp(HeadlessBaseTask):
 绝对禁止：破布娃娃（及人偶、偶人、木偶、断了线的木偶、布娃娃、娃娃等）、濒死的/被抛上岸/砧板上鱼、像一盆冰水、像一把重锤、淬了毒的...、飓风、被抽去骨头的...、祭品、待宰的...、牲畜、最锋利的冰锥、离了水的鱼、重型卡车、灵魂出窍、空白/空白的大脑、行驶的列车/火车、虔诚的...、撞击、山崩地裂、火山爆发、龙卷风、洪流、子弹、炮弹、燎原的火、掠夺、信徒、攻城锤、岩浆、海藻、破碎（形容声音或身体）。
 尽量避免：火星、洪流、毒蛇、小船、催化剂、催情药、小兽、烟花、爆炸、船桨、划船、攻城略地、开疆拓土、机器/机械的、溺水、容器、每一个毛孔都在叫嚣、五脏六腑都错了位、毒刺、羽毛、拉风箱。"""
 
+
+class StyleAnalysisApp(HeadlessBaseTask):
+    def __init__(self):
+        super().__init__()
+
+    def execute_logic(self):
+        pass
+
+    @staticmethod
+    def execute_analysis(original_path, model, log_func, project_name=None):
+        novel_name = os.path.splitext(os.path.basename(original_path))[0]
+        try:
+            original_text = smart_read_text(original_path, max_len=50000)
+        except Exception as exc:
+            log_func(f"读取文件失败: {exc}")
+            return False
+
+        try:
+            style_dir = os.path.join(STYLE_DIR, f"{novel_name}_style_imitation")
+            os.makedirs(style_dir, exist_ok=True)
+            save_path = os.path.join(style_dir, "features.md")
+
+            project_save_path = None
+            if project_name:
+                project_dir = os.path.join(PROJ_DIR, project_name)
+                os.makedirs(project_dir, exist_ok=True)
+                project_save_path = os.path.join(project_dir, "features.md")
+
+            log_func("正在请求 API 进行文风特征动态分析...")
+
+            user_prompt = (
+                "使用严谨客观的语言完成文风提取任务。\n\n"
+                f"{STRUCTURED_SUMMARY_PROMPT}\n\n"
+                f"{ORIGINAL_ANALYSIS_PROMPT}{original_text}"
+            )
             sys_prompt = "你是一个严谨的文本分析程序。请严格按照要求输出 Markdown 格式的纯文本，不要包含任何多余的寒暄。"
-            analysis_result = call_deepseek_api(system_prompt=sys_prompt, user_prompt=prompt_part_1, model=model, temperature=0.3)
-            
-            final_output = f"{analysis_result}\n\n{prompt_part_2}"
-            
+            analysis_result = call_deepseek_api(
+                system_prompt=sys_prompt,
+                user_prompt=user_prompt,
+                model=model,
+                temperature=0.3,
+            )
+
+            final_output = f"{analysis_result}\n\n{FORBIDDEN_APPENDIX}"
+
             try:
-                atomic_write(save_path, final_output, data_type='text')
+                atomic_write(save_path, final_output, data_type="text")
                 msg = f"[INFO] 分析与拼接完成！最终设定文件已原子级落盘至: {save_path}"
                 if project_save_path:
                     shutil.copy2(save_path, project_save_path)
                     msg += f"\n已同步备份至项目目录: {project_save_path}"
                 log_func(msg)
-            except Exception as e:
-                log_func(f"[ERROR] 文件写入失败: {e}")
+            except Exception as exc:
+                log_func(f"[ERROR] 文件写入失败: {exc}")
                 raise
             return True
 
-        except Exception as e:
-            log_func(f"[ERROR] 分析失败: {str(e)}")
+        except Exception as exc:
+            log_func(f"[ERROR] 分析失败: {str(exc)}")
             import traceback
+
             traceback.print_exc()
             return False
 
-def run_headless(target_file, project_name=None, model="deepseek-chat"):
+
+def run_headless(target_file, project_name=None, model="deepseek-v4-flash"):
     import sys
+
     def safe_log(msg):
         try:
             print(msg)
@@ -124,15 +178,16 @@ def run_headless(target_file, project_name=None, model="deepseek-chat"):
         original_path = target_file
     else:
         original_path = os.path.join(REFERENCE_DIR, target_file)
-        
+
     if not os.path.exists(original_path):
         safe_log(f"error: 未找到参考小说原文 {original_path}")
         sys.exit(1)
-    
+
     safe_log(f"开始静默分析文风特征: {original_path}")
     success = StyleAnalysisApp.execute_analysis(original_path, model, safe_log, project_name)
     if not success:
         sys.exit(1)
+
 
 if __name__ == "__main__":
     safe_run_app(
@@ -140,5 +195,5 @@ if __name__ == "__main__":
         headless_func=run_headless,
         target_file="",
         project_name="",
-        model=""
+        model="",
     )

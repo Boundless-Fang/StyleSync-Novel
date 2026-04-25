@@ -5,6 +5,7 @@ import re
 import subprocess
 import sys
 import time
+import threading
 from datetime import datetime
 
 from .config import CODE_DIR, PROJ_DIR
@@ -70,13 +71,29 @@ def _extract_latest_token_count(decoded_line: str) -> int | None:
     return None
 
 
-def _build_task_env(api_key: str | None) -> dict:
+def _extract_latest_token_count_safe(decoded_line: str) -> int | None:
+    token_matches = re.findall(
+        r"(?:Total\s+Tokens|[Tt]okens?|消耗Token|消耗)[:=\s]*(\d+)",
+        decoded_line,
+    )
+    if token_matches:
+        return int(token_matches[-1])
+    return None
+
+
+def _build_task_env(api_key: str | None, runtime_options: dict | None = None) -> dict:
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
 
     if api_key:
         env["DEEPSEEK_API_KEY"] = api_key
+
+    if runtime_options:
+        if "thinking" in runtime_options:
+            env["DEEPSEEK_THINKING"] = "true" if runtime_options["thinking"] else "false"
+        if runtime_options.get("reasoning_effort"):
+            env["DEEPSEEK_REASONING_EFFORT"] = str(runtime_options["reasoning_effort"]).strip().lower()
 
     if not (env.get("SILICONFLOW_API_KEY") or "").strip():
         for alias in ("EMBEDDING_API_KEY", "SILICONFLOW_KEY", "SILICONFLOW_APIKEY"):
@@ -88,6 +105,38 @@ def _build_task_env(api_key: str | None) -> dict:
     existing_pythonpath = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = CODE_DIR if not existing_pythonpath else os.pathsep.join([CODE_DIR, existing_pythonpath])
     return env
+
+
+async def _run_subprocess_thread_fallback(task_id: str, cmd_list: list, env: dict) -> None:
+    loop = asyncio.get_running_loop()
+
+    def _worker():
+        process = subprocess.Popen(
+            cmd_list,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            cwd=CODE_DIR,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        return process.communicate(), process.returncode
+
+    (stdout_text, stderr_text), returncode = await loop.run_in_executor(None, _worker)
+
+    async with tasks_state_lock:
+        task = TASKS.get(task_id)
+        if not task or task.get("status") == "cancelled":
+            return
+        task["last_active_time"] = time.time()
+        latest_tokens = _extract_latest_token_count_safe(stdout_text or "")
+        if latest_tokens is not None:
+            task["tokens"] = latest_tokens
+        _append_task_log(task, stdout_text or "", "stdout")
+        _append_task_log(task, stderr_text or "", "stderr")
+        task["returncode"] = returncode
+        task["status"] = "success" if returncode == 0 else "failed"
 
 
 async def _terminate_process(process) -> None:
@@ -315,7 +364,14 @@ async def zombie_reaper_loop() -> None:
                     print(f"[WATCHDOG ERROR] 终止失败: {exc}")
 
 
-async def run_task_safely_pool(task_id: str, module_name: str, func_name: str, kwargs: dict, api_key: str = None):
+async def run_task_safely_pool(
+    task_id: str,
+    module_name: str,
+    func_name: str,
+    kwargs: dict,
+    api_key: str = None,
+    runtime_options: dict | None = None,
+):
     """Backward-compatible wrapper for subprocess-based task execution."""
     cmd = [sys.executable, "-m", module_name]
     for key, value in kwargs.items():
@@ -325,10 +381,15 @@ async def run_task_safely_pool(task_id: str, module_name: str, func_name: str, k
         else:
             cmd.extend([f"--{key}", str(value)])
 
-    await run_task_safely(task_id, cmd, api_key)
+    await run_task_safely(task_id, cmd, api_key, runtime_options)
 
 
-async def run_task_safely(task_id: str, cmd_list: list, api_key: str = None) -> None:
+async def run_task_safely(
+    task_id: str,
+    cmd_list: list,
+    api_key: str = None,
+    runtime_options: dict | None = None,
+) -> None:
     await start_watchdog_if_needed()
 
     async with tasks_state_lock:
@@ -337,7 +398,7 @@ async def run_task_safely(task_id: str, cmd_list: list, api_key: str = None) -> 
             _mark_task_queued(task)
 
     asyncio.create_task(save_and_prune_tasks_async())
-    env = _build_task_env(api_key)
+    env = _build_task_env(api_key, runtime_options)
 
     try:
         async with background_semaphore:
@@ -347,13 +408,17 @@ async def run_task_safely(task_id: str, cmd_list: list, api_key: str = None) -> 
                     return
                 _mark_task_active(task)
 
-            process = await asyncio.create_subprocess_exec(
-                *cmd_list,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=env,
-                cwd=CODE_DIR,
-            )
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    *cmd_list,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=env,
+                    cwd=CODE_DIR,
+                )
+            except NotImplementedError:
+                await _run_subprocess_thread_fallback(task_id, cmd_list, env)
+                return
 
             async with active_procs_lock:
                 ACTIVE_PROCESSES[task_id] = process
@@ -396,7 +461,7 @@ async def run_task_safely(task_id: str, cmd_list: list, api_key: str = None) -> 
                             continue
                         task["last_active_time"] = time.time()
                         if key == "stdout":
-                            latest_tokens = _extract_latest_token_count(decoded_line)
+                            latest_tokens = _extract_latest_token_count_safe(decoded_line)
                             if latest_tokens is not None:
                                 task["tokens"] = latest_tokens
                         _append_task_log(task, decoded_line, key)
@@ -444,12 +509,12 @@ async def run_task_safely(task_id: str, cmd_list: list, api_key: str = None) -> 
             if task:
                 task["status"] = "error"
                 task["error"] = "系统子进程调度异常：权限不足或运行环境受限。"
-    except Exception:
+    except Exception as exc:
         async with tasks_state_lock:
             task = TASKS.get(task_id)
             if task:
                 task["status"] = "error"
-                task["error"] = "系统执行异常：任务上下文保护失败。"
+                task["error"] = f"系统执行异常：{exc.__class__.__name__}: {mask_sensitive_info(str(exc))}"
     finally:
         async with tasks_state_lock:
             task = TASKS.get(task_id)

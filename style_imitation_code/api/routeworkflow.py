@@ -1,10 +1,15 @@
 import asyncio
 import base64
+import contextlib
+import importlib
+import io
 import json
 import os
 import re
 import shutil
 import sys
+import time
+import traceback
 import uuid
 from datetime import datetime
 
@@ -12,7 +17,7 @@ from fastapi import APIRouter, File, Header, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from .config import CODE_DIR, PROJ_DIR, REF_DIR, STYLE_DIR
-from .models import ChapterOutlineRequest, NovelGenerationRequest, SettingCompletionRequest
+from .models import ChapterOutlineRequest, ChapterRewriteRequest, NovelGenerationRequest, SettingCompletionRequest
 from .tasks import (
     TASKS,
     add_task_safe,
@@ -95,6 +100,11 @@ SCRIPT_REGISTRY = {
     "f5b": {
         "module": "f5b_llm_novel_generation",
         "display_name": "正文生成",
+        "maturity": "stable",
+    },
+    "f5c": {
+        "module": "f5c_llm_chapter_rewrite",
+        "display_name": "现有章节智能改写",
         "maturity": "stable",
     },
     "f6": {
@@ -253,6 +263,100 @@ def _resolve_target_path(target_file: str, *, allowed_extensions) -> str:
 def _encode_json_payload(payload: dict) -> str:
     json_string = json.dumps(payload, ensure_ascii=False)
     return base64.b64encode(json_string.encode("utf-8")).decode("utf-8")
+
+
+def _build_runtime_options(thinking: bool = False, reasoning_effort: str = "high") -> dict:
+    effort = (reasoning_effort or "high").strip().lower()
+    if effort not in {"high", "max"}:
+        raise ValueError("reasoning_effort must be one of: high/max")
+    return {"thinking": bool(thinking), "reasoning_effort": effort}
+
+
+async def _run_f5a_inprocess_task(
+    task_id: str,
+    *,
+    project_name: str,
+    chapter_name: str,
+    chapter_brief: dict,
+    model: str,
+    api_key: str | None,
+    runtime_options: dict,
+) -> None:
+    task = TASKS.get(task_id)
+    if task:
+        task["status"] = "running"
+        task["start_time"] = datetime.now().isoformat()
+        task["last_active_time"] = time.time()
+        task["stdout"] = ""
+        task["stderr"] = ""
+        task["tokens"] = 0
+
+    logs: list[str] = []
+
+    def _log(message: str) -> None:
+        text = str(message)
+        logs.append(text)
+        current = TASKS.get(task_id)
+        if current is not None:
+            current["stdout"] = ("\n".join(logs))[-15000:]
+            current["last_active_time"] = time.time()
+
+    def _worker() -> bool:
+        module = importlib.import_module("scripts.f5a_llm_chapter_outline")
+        previous_env = {
+            "DEEPSEEK_API_KEY": os.environ.get("DEEPSEEK_API_KEY"),
+            "DEEPSEEK_THINKING": os.environ.get("DEEPSEEK_THINKING"),
+            "DEEPSEEK_REASONING_EFFORT": os.environ.get("DEEPSEEK_REASONING_EFFORT"),
+        }
+        stdout_buffer = io.StringIO()
+        stderr_buffer = io.StringIO()
+        try:
+            if api_key:
+                os.environ["DEEPSEEK_API_KEY"] = api_key
+            os.environ["DEEPSEEK_THINKING"] = "true" if runtime_options.get("thinking") else "false"
+            os.environ["DEEPSEEK_REASONING_EFFORT"] = runtime_options.get("reasoning_effort", "high")
+            with contextlib.redirect_stdout(stdout_buffer), contextlib.redirect_stderr(stderr_buffer):
+                success = module.ChapterOutlineApp.execute_generation(
+                    project_name,
+                    chapter_brief,
+                    chapter_name,
+                    model,
+                    _log,
+                )
+            return success, stdout_buffer.getvalue(), stderr_buffer.getvalue()
+        finally:
+            for key, value in previous_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+    try:
+        success, stdout_text, stderr_text = await asyncio.to_thread(_worker)
+        task = TASKS.get(task_id)
+        if task:
+            combined_stdout = "\n".join(logs)
+            if stdout_text:
+                combined_stdout = f"{combined_stdout}\n{stdout_text}".strip()
+            task["stdout"] = combined_stdout[-15000:]
+            task["stderr"] = (stderr_text or "")[-15000:]
+            token_matches = re.findall(r"(?:Total\s+Tokens|[Tt]okens?)\s*[:=]?\s*(\d+)", stdout_text or "")
+            if token_matches:
+                task["tokens"] = int(token_matches[-1])
+            task["status"] = "success" if success else "failed"
+            if not success:
+                task["error"] = "f5a outline generation failed"
+    except Exception as exc:
+        task = TASKS.get(task_id)
+        if task:
+            task["status"] = "error"
+            task["error"] = f"系统执行异常：{exc.__class__.__name__}: {mask_sensitive_info(str(exc))}"
+            task["stderr"] = traceback.format_exc()[-15000:]
+    finally:
+        task = TASKS.get(task_id)
+        if task:
+            task["end_time"] = datetime.now().isoformat()
+        asyncio.create_task(save_and_prune_tasks_async())
 
 
 def _build_style_context(target_file: str, character: str):
@@ -423,6 +527,7 @@ async def run_f4a_completion(req: SettingCompletionRequest, x_api_key: str = Hea
         project_name = _optional_safe_param(req.project_name)
         mode = validate_safe_param(req.mode)
         model = validate_safe_param(req.model)
+        runtime_options = _build_runtime_options(req.thinking, req.reasoning_effort)
         _ensure_script_available("f4a")
 
         target_path = ""
@@ -454,6 +559,7 @@ async def run_f4a_completion(req: SettingCompletionRequest, x_api_key: str = Hea
                 "run_headless",
                 kwargs,
                 x_api_key,
+                runtime_options,
             )
         )
         return _create_started_response("f4a", task_id, f"任务已加入执行队列：f4a（{mode} 模式）")
@@ -469,6 +575,7 @@ async def run_f5a_outline(req: ChapterOutlineRequest, x_api_key: str = Header(No
         project_name = validate_safe_param(req.project_name)
         chapter_name = validate_safe_param(req.chapter_name)
         model = validate_safe_param(req.model)
+        runtime_options = _build_runtime_options(req.thinking, req.reasoning_effort)
         _ensure_script_available("f5a")
 
         brief_payload = (
@@ -476,25 +583,20 @@ async def run_f5a_outline(req: ChapterOutlineRequest, x_api_key: str = Header(No
             if isinstance(req.chapter_brief, dict)
             else {"chapter_brief": req.chapter_brief}
         )
-        kwargs = {
-            "project": project_name,
-            "chapter": chapter_name,
-            "brief": f"b64:{_encode_json_payload(brief_payload)}",
-            "model": model,
-        }
-
         task_id = await _create_task(
             "f5a",
             f"f5a [{model}]: {project_name} - {chapter_name}",
             project_name,
         )
         asyncio.create_task(
-            run_task_safely_pool(
+            _run_f5a_inprocess_task(
                 task_id,
-                "scripts.f5a_llm_chapter_outline",
-                "run_headless",
-                kwargs,
-                x_api_key,
+                project_name=project_name,
+                chapter_name=chapter_name,
+                chapter_brief=brief_payload,
+                model=model,
+                api_key=x_api_key,
+                runtime_options=runtime_options,
             )
         )
         return _create_started_response("f5a", task_id, "任务已加入执行队列：f5a 大纲生成")
@@ -557,6 +659,7 @@ async def run_f5b_generate(req: NovelGenerationRequest, x_api_key: str = Header(
         project_name = validate_safe_param(req.project_name)
         chapter_name = validate_safe_param(req.chapter_name)
         model = validate_safe_param(req.model)
+        runtime_options = _build_runtime_options(req.thinking, req.reasoning_effort)
         _ensure_script_available("f5b")
 
         kwargs = {
@@ -577,11 +680,50 @@ async def run_f5b_generate(req: NovelGenerationRequest, x_api_key: str = Header(
                 "run_headless",
                 kwargs,
                 x_api_key,
+                runtime_options,
             )
         )
         return _create_started_response("f5b", task_id, "任务已加入执行队列：f5b 正文生成")
     except ValueError as exc:
         raise HTTPException(status_code=403, detail=mask_sensitive_info(str(exc))) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=mask_sensitive_info(str(exc))) from exc
+
+
+@router.post("/api/scripts/f5c_preview")
+async def run_f5c_preview(req: ChapterRewriteRequest):
+    try:
+        project_name = validate_safe_param(req.project_name)
+        chapter_name = validate_safe_param(req.chapter_name)
+        mode = validate_safe_param(req.mode)
+        model = validate_safe_param(req.model)
+        runtime_options = _build_runtime_options(req.thinking, req.reasoning_effort)
+        _ensure_script_available("f5c")
+
+        if mode not in {"prefix", "fim"}:
+            raise ValueError("mode must be one of: prefix/fim")
+        if mode == "fim" and not req.suffix_text:
+            raise ValueError("fim 模式必须提供保留后缀文本")
+
+        from scripts.f5c_llm_chapter_rewrite import ChapterRewriteApp
+
+        result = await asyncio.to_thread(
+            ChapterRewriteApp.execute_rewrite_preview,
+            project_name,
+            chapter_name,
+            mode,
+            req.original_content,
+            req.prefix_text,
+            req.suffix_text,
+            req.selected_text,
+            model,
+            runtime_options["thinking"],
+            runtime_options["reasoning_effort"],
+            lambda msg: None,
+        )
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=mask_sensitive_info(str(exc))) from exc
     except OSError as exc:
         raise HTTPException(status_code=500, detail=mask_sensitive_info(str(exc))) from exc
 
@@ -593,7 +735,9 @@ async def run_script(
     project_name: str = "",
     character: str = "",
     chapter_name: str = "",
-    model: str = "deepseek-chat",
+    model: str = "deepseek-v4-flash",
+    thinking: bool = False,
+    reasoning_effort: str = "high",
     force: bool = False,
     x_api_key: str = Header(None),
 ):
@@ -608,6 +752,7 @@ async def run_script(
         character = _optional_safe_param(character)
         chapter_name = _optional_safe_param(chapter_name)
         model = validate_safe_param(model)
+        runtime_options = _build_runtime_options(thinking, reasoning_effort)
 
         config = _ensure_script_available(script_type)
         _validate_generic_inputs(script_type, character, chapter_name)
@@ -653,6 +798,7 @@ async def run_script(
                 "run_headless",
                 kwargs,
                 x_api_key,
+                runtime_options,
             )
         )
         return _create_started_response(

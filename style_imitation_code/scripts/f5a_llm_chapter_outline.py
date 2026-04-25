@@ -5,11 +5,126 @@ import numpy as np
 
 from core._core_cli_runner import HeadlessBaseTask, inject_env, safe_run_app
 from core._core_config import PROJ_DIR
-from core._core_llm import call_deepseek_api
+from core._core_llm import call_deepseek_api_json_object
 from core._core_rag import RAGRetriever
 from core._core_utils import atomic_write, smart_read_text
 
 inject_env()
+
+EVENT_STAGE_OPTIONS = ["无指定", "事件开端", "事件推进", "事件高潮", "事件收束", "日常", "单章事件"]
+NOVEL_STAGE_OPTIONS = ["无指定", "前期", "中期", "后期"]
+CHAPTER_FUNCTION_OPTIONS = [
+    "主线推进",
+    "引出人物",
+    "前情回顾",
+    "角色互动",
+    "打斗对抗",
+    "身份揭示",
+    "埋下伏笔",
+    "回收伏笔",
+    "设定展开",
+    "情绪过渡",
+]
+PERSON_OPTIONS = ["无指定", "第一人称", "有限制第三人称", "无限制第三人称"]
+PERSPECTIVE_OPTIONS = ["无指定", "男主视角", "女主视角", "中立视角"]
+SCENE_SWITCH_OPTIONS = ["无指定", "无", "一次", "多次"]
+PACE_OPTIONS = ["无指定", "慢", "中", "快"]
+NARRATIVE_OPTIONS = ["无指定", "顺叙", "倒叙", "插叙", "补叙", "分叙"]
+DEPICTION_OPTIONS = ["对话与互动", "叙事与动作", "反应与侧写", "解释与说明", "环境与外貌"]
+DRIVE_OPTIONS = ["无指定", "场景", "动作", "对话", "反应", "说明", "心理", "外貌"]
+REVEAL_OPTIONS = ["无指定", "无", "直接揭示", "延迟揭示", "假设揭示", "对话中带出", "他人反应带出"]
+
+F5A_OUTLINE_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "position": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "event_stage": {"type": "string", "enum": EVENT_STAGE_OPTIONS[1:]},
+                "novel_stage": {"type": "string", "enum": NOVEL_STAGE_OPTIONS[1:]},
+                "chapter_functions": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": CHAPTER_FUNCTION_OPTIONS},
+                    "minItems": 1,
+                    "maxItems": 3,
+                },
+                "chapter_brief": {"type": "string"},
+                "chapter_boundary": {"type": "string"},
+                "person": {"type": "string", "enum": PERSON_OPTIONS[1:]},
+                "perspective": {"type": "string", "enum": PERSPECTIVE_OPTIONS[1:]},
+                "characters": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "target_words": {"type": "string"},
+                "scene_switch": {"type": "string", "enum": SCENE_SWITCH_OPTIONS[1:]},
+                "narrative": {"type": "string", "enum": NARRATIVE_OPTIONS[1:]},
+                "pace": {"type": "string", "enum": PACE_OPTIONS[1:]},
+                "ban": {"type": "string"},
+            },
+            "required": [
+                "event_stage",
+                "novel_stage",
+                "chapter_functions",
+                "chapter_brief",
+                "chapter_boundary",
+                "person",
+                "perspective",
+                "characters",
+                "target_words",
+                "scene_switch",
+                "narrative",
+                "pace",
+                "ban",
+            ],
+        },
+        "structure": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "opening": {"$ref": "#/$defs/stage"},
+                "buildup": {"$ref": "#/$defs/stage"},
+                "climax": {"$ref": "#/$defs/stage"},
+                "ending": {"$ref": "#/$defs/stage"},
+            },
+            "required": ["opening", "buildup", "climax", "ending"],
+        },
+    },
+    "required": ["position", "structure"],
+    "$defs": {
+        "stage": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "content": {"type": "string"},
+                "ban": {"type": "string"},
+                "narrative": {"type": "string", "enum": NARRATIVE_OPTIONS[1:]},
+                "depiction": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": DEPICTION_OPTIONS},
+                    "minItems": 1,
+                    "maxItems": 3,
+                },
+                "drive": {"type": "string", "enum": DRIVE_OPTIONS[1:]},
+                "word_ratio": {"type": "string"},
+                "reveal": {"type": "string", "enum": REVEAL_OPTIONS[1:]},
+                "foreshadowing": {"type": "string"},
+            },
+            "required": [
+                "content",
+                "ban",
+                "narrative",
+                "depiction",
+                "drive",
+                "word_ratio",
+                "reveal",
+                "foreshadowing",
+            ],
+        }
+    },
+}
 
 
 class ChapterOutlineApp(HeadlessBaseTask):
@@ -32,13 +147,13 @@ class ChapterOutlineApp(HeadlessBaseTask):
     def create_default_stage():
         return {
             "content": "",
-            "ban": "无",
-            "narrative": "顺叙",
+            "ban": "无指定",
+            "narrative": "无指定",
             "depiction": [],
-            "drive": "场景",
+            "drive": "无指定",
             "word_ratio": "",
-            "reveal": "无",
-            "foreshadowing": "无",
+            "reveal": "无指定",
+            "foreshadowing": "无指定",
         }
 
     @staticmethod
@@ -49,13 +164,13 @@ class ChapterOutlineApp(HeadlessBaseTask):
             depiction = [depiction]
         return {
             "content": str(data.get("content") or "").strip(),
-            "ban": str(data.get("ban") or "无").strip() or "无",
-            "narrative": str(data.get("narrative") or "顺叙").strip() or "顺叙",
+            "ban": str(data.get("ban") or "无指定").strip() or "无指定",
+            "narrative": str(data.get("narrative") or "无指定").strip() or "无指定",
             "depiction": [str(item).strip() for item in depiction if str(item).strip()],
-            "drive": str(data.get("drive") or "场景").strip() or "场景",
+            "drive": str(data.get("drive") or "无指定").strip() or "无指定",
             "word_ratio": str(data.get("word_ratio") or "").strip(),
-            "reveal": str(data.get("reveal") or "无").strip() or "无",
-            "foreshadowing": str(data.get("foreshadowing") or "无").strip() or "无",
+            "reveal": str(data.get("reveal") or "无指定").strip() or "无指定",
+            "foreshadowing": str(data.get("foreshadowing") or "无指定").strip() or "无指定",
         }
 
     @staticmethod
@@ -82,16 +197,17 @@ class ChapterOutlineApp(HeadlessBaseTask):
                 or data.get("boundary")
                 or "未提供明确边界，默认停在本章核心事件完成后的首个自然悬停点。"
             ).strip(),
-            "stage": str(data.get("event_stage") or data.get("stage") or "未指定").strip(),
-            "novel_stage": str(data.get("novel_stage") or "未指定").strip(),
+            "stage": str(data.get("event_stage") or data.get("stage") or "无指定").strip(),
+            "novel_stage": str(data.get("novel_stage") or "无指定").strip(),
             "functions": data.get("chapter_functions") or data.get("functions") or [],
-            "person": str(data.get("person") or "未指定").strip(),
-            "perspective": str(data.get("perspective") or "未指定").strip(),
+            "person": str(data.get("person") or "无指定").strip(),
+            "perspective": str(data.get("perspective") or "无指定").strip(),
             "characters": data.get("characters") or data.get("cast") or [],
             "target_words": str(data.get("target_words") or data.get("word_count") or "3000字左右").strip(),
-            "scene_switch": str(data.get("scene_switch") or "未指定").strip(),
-            "pace": str(data.get("pace") or data.get("narrative_pace") or "未指定").strip(),
-            "ban": str(data.get("ban") or data.get("forbidden") or data.get("chapter_ban") or "无").strip(),
+            "scene_switch": str(data.get("scene_switch") or "无指定").strip(),
+            "narrative": str(data.get("narrative") or data.get("narrative_mode") or "无指定").strip(),
+            "pace": str(data.get("pace") or data.get("narrative_pace") or "无指定").strip(),
+            "ban": str(data.get("ban") or data.get("forbidden") or data.get("chapter_ban") or "无指定").strip(),
             "structure": {
                 "opening": ChapterOutlineApp.normalize_stage(structure.get("opening")),
                 "buildup": ChapterOutlineApp.normalize_stage(structure.get("buildup")),
@@ -101,12 +217,118 @@ class ChapterOutlineApp(HeadlessBaseTask):
         }
 
     @staticmethod
-    def format_choice_list(value, default="未指定"):
+    def format_choice_list(value, default="无指定"):
         if isinstance(value, (list, tuple, set)):
             cleaned = [str(item).strip() for item in value if str(item).strip()]
             return " / ".join(cleaned) if cleaned else default
         text = str(value).strip()
         return text or default
+
+    @staticmethod
+    def _pick_enum(value, options, fallback):
+        cleaned = str(value or "").strip()
+        return cleaned if cleaned in options else fallback
+
+    @staticmethod
+    def _pick_multi(value, options):
+        cleaned = [str(item).strip() for item in (value or []) if str(item).strip() in options]
+        deduped = []
+        for item in cleaned:
+            if item not in deduped:
+                deduped.append(item)
+        return deduped
+
+    @staticmethod
+    def normalize_llm_outline(result):
+        position = dict(result.get("position") or {})
+        structure = dict(result.get("structure") or {})
+
+        def normalize_stage_result(stage_data):
+            stage = ChapterOutlineApp.normalize_stage(stage_data)
+            stage["narrative"] = ChapterOutlineApp._pick_enum(stage["narrative"], NARRATIVE_OPTIONS[1:], "顺叙")
+            stage["depiction"] = ChapterOutlineApp._pick_multi(stage["depiction"], DEPICTION_OPTIONS)[:3] or ["叙事与动作"]
+            stage["drive"] = ChapterOutlineApp._pick_enum(stage["drive"], DRIVE_OPTIONS[1:], "场景")
+            stage["reveal"] = ChapterOutlineApp._pick_enum(stage["reveal"], REVEAL_OPTIONS[1:], "无")
+            if stage["ban"] == "无指定":
+                stage["ban"] = "无"
+            if stage["foreshadowing"] == "无指定":
+                stage["foreshadowing"] = "无"
+            return stage
+
+        normalized = {
+            "position": {
+                "event_stage": ChapterOutlineApp._pick_enum(position.get("event_stage"), EVENT_STAGE_OPTIONS[1:], "事件推进"),
+                "novel_stage": ChapterOutlineApp._pick_enum(position.get("novel_stage"), NOVEL_STAGE_OPTIONS[1:], "中期"),
+                "chapter_functions": ChapterOutlineApp._pick_multi(position.get("chapter_functions"), CHAPTER_FUNCTION_OPTIONS)[:3] or ["主线推进"],
+                "chapter_brief": str(position.get("chapter_brief") or "").strip() or "本章围绕核心事件推进，并在自然收束处停住。",
+                "chapter_boundary": str(position.get("chapter_boundary") or "").strip() or "停在本章核心事件完成后的首个自然悬停点。",
+                "person": ChapterOutlineApp._pick_enum(position.get("person"), PERSON_OPTIONS[1:], "有限制第三人称"),
+                "perspective": ChapterOutlineApp._pick_enum(position.get("perspective"), PERSPECTIVE_OPTIONS[1:], "中立视角"),
+                "characters": [str(item).strip() for item in (position.get("characters") or []) if str(item).strip()],
+                "target_words": str(position.get("target_words") or "").strip() or "3000字左右",
+                "scene_switch": ChapterOutlineApp._pick_enum(position.get("scene_switch"), SCENE_SWITCH_OPTIONS[1:], "一次"),
+                "narrative": ChapterOutlineApp._pick_enum(position.get("narrative"), NARRATIVE_OPTIONS[1:], "顺叙"),
+                "pace": ChapterOutlineApp._pick_enum(position.get("pace"), PACE_OPTIONS[1:], "中"),
+                "ban": str(position.get("ban") or "").strip() or "无",
+            },
+            "structure": {
+                "opening": normalize_stage_result(structure.get("opening")),
+                "buildup": normalize_stage_result(structure.get("buildup")),
+                "climax": normalize_stage_result(structure.get("climax")),
+                "ending": normalize_stage_result(structure.get("ending")),
+            },
+        }
+        return normalized
+
+    @staticmethod
+    def render_markdown_outline(outline):
+        position = outline["position"]
+        structure = outline["structure"]
+
+        stage_blocks = [
+            ("1. 开端 / 承接", structure["opening"]),
+            ("2. 铺垫 / 延展", structure["buildup"]),
+            ("3. 高潮 / 爽点", structure["climax"]),
+            ("4. 钩子 / 结尾", structure["ending"]),
+        ]
+
+        lines = [
+            "# 第一层：本章定位",
+            f"- 所处阶段：{position['event_stage']}",
+            f"- 小说位置：{position['novel_stage']}",
+            f"- 本章功能：{ChapterOutlineApp.format_choice_list(position['chapter_functions'])}",
+            f"- 本章梗概：{position['chapter_brief']}",
+            f"- 本章边界：{position['chapter_boundary']}",
+            f"- 人称：{position['person']}",
+            f"- 视角：{position['perspective']}",
+            f"- 出场角色：{ChapterOutlineApp.format_choice_list(position['characters'], default='无明确角色')}",
+            f"- 字数：{position['target_words']}",
+            f"- 场景切换：{position['scene_switch']}",
+            f"- 叙事方式：{position['narrative']}",
+            f"- 叙事节奏：{position['pace']}",
+            f"- 本章禁止事项：{position['ban']}",
+            "",
+            "# 第二层：本章结构",
+            "",
+        ]
+
+        for title, stage in stage_blocks:
+            lines.extend(
+                [
+                    f"## {title}",
+                    f"- 本章内容：{stage['content'] or '未指定'}",
+                    f"- 禁止事项：{stage['ban']}",
+                    f"- 叙述手法：{stage['narrative']}",
+                    f"- 描写手法：{ChapterOutlineApp.format_choice_list(stage['depiction'])}",
+                    f"- 推进方式：{stage['drive']}",
+                    f"- 字数占比：{stage['word_ratio'] or '未指定'}",
+                    f"- 信息揭示：{stage['reveal']}",
+                    f"- 伏笔/铺垫：{stage['foreshadowing']}",
+                    "",
+                ]
+            )
+
+        return "\n".join(lines).strip() + "\n"
 
     @staticmethod
     def get_filtered_characters(target_dir, chapter_data, log_func):
@@ -255,12 +477,11 @@ class ChapterOutlineApp(HeadlessBaseTask):
 不要只罗列信息点，必须体现本章展开顺序、信息显露顺序、冲突推进顺序和收尾方式。
 
 【规则五：选项约束】
-默认情况下，所有带固定选项的字段，必须严格从给定选项中选择，不得自造类别，不得改写选项名称。
-只有带有“（允许发挥）”标记的字段，才允许自由填写。
+所有枚举字段必须严格从候选项中选择，不得自造类别，不得改写选项名称。
 
 【规则六：输出格式】
-只输出 Markdown 纯文本。
-不要输出解释、寒暄、分析过程、提示词说明或任何额外备注。"""
+你必须只输出符合给定 JSON Schema 的 JSON 对象。
+不要输出 Markdown，不要输出解释、寒暄、分析过程、提示词说明或任何额外备注。"""
 
         user_input = f"""请根据以下信息，为本章生成一份“可执行的章节大纲骨架”。
 
@@ -304,6 +525,7 @@ class ChapterOutlineApp(HeadlessBaseTask):
 - 出场角色：{ChapterOutlineApp.format_choice_list(chapter_data["characters"])}
 - 字数：{chapter_data["target_words"]}
 - 场景切换：{chapter_data["scene_switch"]}
+- 叙事方式：{chapter_data["narrative"]}
 - 叙事节奏：{chapter_data["pace"]}
 - 本章禁止事项：{chapter_data["ban"]}
 
@@ -312,65 +534,11 @@ class ChapterOutlineApp(HeadlessBaseTask):
 {structure_reference}
 
 ---
-# 输出要求
-
-请严格按以下结构输出：
-
-# 第一层：本章定位
-- 所处阶段：事件开端 / 事件推进 / 事件高潮 / 事件收束 / 日常 / 单章事件
-- 小说位置：前期 / 中期 / 后期
-- 本章功能（选择1-3个）：主线推进 / 引出人物 / 前情回顾 / 角色互动 / 打斗对抗 / 身份揭示 / 埋下伏笔 / 回收伏笔 / 设定展开 / 情绪过渡
-- 本章梗概：（允许发挥，一句话概括，采用“起因-经过-结果”形式）
-- 本章边界：（允许发挥，明确写到哪里停）
-- 人称：第一人称 / 有限制第三人称 / 无限制第三人称
-- 视角：男主视角 / 女主视角 / 中立视角
-- 出场角色：（允许发挥，列出本章必须出场或重点出场的角色）
-- 字数：（允许发挥，默认3000字左右，可根据本章功能微调）
-- 场景切换：无 / 一次 / 多次
-- 叙事节奏：慢 / 中 / 快
-- 本章禁止事项：（允许发挥，列出本章明确不能提前推进、不能提前揭示、不能出现的内容）
-
-# 第二层：本章结构
-
-## 1. 开端 / 承接
-- 本章内容：（允许发挥，一句话概括本阶段内容）
-- 禁止事项：（允许发挥，若无则填“无”）
-- 叙述手法：顺叙 / 插叙 / 倒叙 / 补叙 / 双线
-- 描写手法（选择1-3个）：对话与互动 / 叙事与动作 / 反应与侧写 / 解释与说明 / 环境与外貌
-- 推进方式：场景 / 动作 / 对话 / 反应 / 说明 / 心理 / 外貌
-- 字数占比：（允许发挥，写明该阶段占全文的比例与大致字数范围）
-- 信息揭示：无 / 直接揭示 / 延迟揭示 / 假设揭示 / 对话中带出 / 他人反应带出
-- 伏笔/铺垫：（允许发挥，没有则写“无”；有则写清具体内容）
-
-## 2. 铺垫 / 延展
-- 本章内容：（允许发挥，一句话概括本阶段内容）
-- 禁止事项：（允许发挥，若无则填“无”）
-- 叙述手法：顺叙 / 插叙 / 倒叙 / 补叙 / 双线
-- 描写手法（选择1-3个）：对话与互动 / 叙事与动作 / 反应与侧写 / 解释与说明 / 环境与外貌
-- 推进方式：场景 / 动作 / 对话 / 反应 / 说明 / 心理 / 外貌
-- 字数占比：（允许发挥，写明该阶段占全文的比例与大致字数范围）
-- 信息揭示：无 / 直接揭示 / 延迟揭示 / 假设揭示 / 对话中带出 / 他人反应带出
-- 伏笔/铺垫：（允许发挥，没有则写“无”；有则写清具体内容）
-
-## 3. 高潮 / 爽点
-- 本章内容：（允许发挥，一句话概括本阶段内容）
-- 禁止事项：（允许发挥，若无则填“无”）
-- 叙述手法：顺叙 / 插叙 / 倒叙 / 补叙 / 双线
-- 描写手法（选择1-3个）：对话与互动 / 叙事与动作 / 反应与侧写 / 解释与说明 / 环境与外貌
-- 推进方式：场景 / 动作 / 对话 / 反应 / 说明 / 心理 / 外貌
-- 字数占比：（允许发挥，写明该阶段占全文的比例与大致字数范围）
-- 信息揭示：无 / 直接揭示 / 延迟揭示 / 假设揭示 / 对话中带出 / 他人反应带出
-- 伏笔/铺垫：（允许发挥，没有则写“无”；有则写清具体内容）
-
-## 4. 钩子 / 结尾
-- 本章内容：（允许发挥，一句话概括本阶段内容）
-- 禁止事项：（允许发挥，若无则填“无”）
-- 叙述手法：顺叙 / 插叙 / 倒叙 / 补叙 / 双线
-- 描写手法（选择1-3个）：对话与互动 / 叙事与动作 / 反应与侧写 / 解释与说明 / 环境与外貌
-- 推进方式：场景 / 动作 / 对话 / 反应 / 说明 / 心理 / 外貌
-- 字数占比：（允许发挥，写明该阶段占全文的比例与大致字数范围）
-- 信息揭示：无 / 直接揭示 / 延迟揭示 / 假设揭示 / 对话中带出 / 他人反应带出
-- 伏笔/铺垫：（允许发挥，没有则写“无”；有则写清具体内容）
+# JSON 输出要求
+1. 必须输出一个 JSON 对象，顶层包含 position 和 structure 两个字段。
+2. 枚举字段必须从候选项里严格选择。
+3. 当用户填写“无指定”或未提供信息时，你需要结合背景信息自动补全为最合理的选项，而不是返回“无指定”。
+4. 字段内容要尽量具体、可执行，便于后续正文生成直接使用。
 
 ---
 # 额外要求
@@ -380,11 +548,46 @@ class ChapterOutlineApp(HeadlessBaseTask):
 4. 外貌描写、身份介绍、设定说明优先自然嵌入场景、动作、对话、反应中。
 5. 大纲必须可执行，能够直接交给正文生成模块使用。"""
 
+        json_contract = f"""
+
+---
+# JSON 输出硬约束
+1. 只输出一个合法 JSON 对象，不要输出 Markdown，不要输出解释，不要输出代码块。
+2. 顶层必须包含 `position` 和 `structure` 两个键。
+3. `position` 必须包含这些键：
+`event_stage`, `novel_stage`, `chapter_functions`, `chapter_brief`, `chapter_boundary`, `person`, `perspective`, `characters`, `target_words`, `scene_switch`, `narrative`, `pace`, `ban`
+4. `structure` 必须包含这些键：
+`opening`, `buildup`, `climax`, `ending`
+5. 每个阶段对象必须包含这些键：
+`content`, `ban`, `narrative`, `depiction`, `drive`, `word_ratio`, `reveal`, `foreshadowing`
+6. 所有字段都必须填写，禁止返回 null，禁止省略字段。
+7. `chapter_functions`、`characters`、`depiction` 必须是数组。
+8. 如果用户给的是“无指定”，你必须根据上下文自动补全为具体值，不要直接输出“无指定”。
+
+# 枚举候选值
+- event_stage: {", ".join(EVENT_STAGE_OPTIONS[1:])}
+- novel_stage: {", ".join(NOVEL_STAGE_OPTIONS[1:])}
+- chapter_functions: {", ".join(CHAPTER_FUNCTION_OPTIONS)}
+- person: {", ".join(PERSON_OPTIONS[1:])}
+- perspective: {", ".join(PERSPECTIVE_OPTIONS[1:])}
+- scene_switch: {", ".join(SCENE_SWITCH_OPTIONS[1:])}
+- narrative: {", ".join(NARRATIVE_OPTIONS[1:])}
+- pace: {", ".join(PACE_OPTIONS[1:])}
+- depiction: {", ".join(DEPICTION_OPTIONS)}
+- drive: {", ".join(DRIVE_OPTIONS[1:])}
+- reveal: {", ".join(REVEAL_OPTIONS[1:])}
+"""
+
         try:
-            log_func("正在连接 DeepSeek 执行深度大纲推演...")
-            result_text = call_deepseek_api(
-                system_prompt=sys_prompt, user_prompt=user_input, model=model, temperature=0.6
+            log_func("正在连接 DeepSeek 执行 JSON 大纲推演...")
+            result_json = call_deepseek_api_json_object(
+                system_prompt=sys_prompt,
+                user_prompt=user_input + json_contract,
+                model=model,
+                temperature=0.6,
             )
+            normalized_outline = ChapterOutlineApp.normalize_llm_outline(result_json)
+            result_text = ChapterOutlineApp.render_markdown_outline(normalized_outline)
             atomic_write(save_path, result_text, data_type="text")
             log_func(f"[INFO] 章节大纲生成成功，已保存至: {save_path}")
             return True
@@ -393,7 +596,7 @@ class ChapterOutlineApp(HeadlessBaseTask):
             return False
 
 
-def run_headless(project_name, chapter_name, chapter_brief_json, model="deepseek-chat"):
+def run_headless(project_name, chapter_name, chapter_brief_json, model="deepseek-v4-flash"):
     import base64
     import sys
 

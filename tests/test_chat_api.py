@@ -78,7 +78,7 @@ def test_chat_rejects_empty_messages():
         "/api/chat",
         json={
             "api_key": "test-key",
-            "model": "deepseek-chat",
+            "model": "deepseek-v4-flash",
             "messages": [],
         },
     )
@@ -91,7 +91,7 @@ def test_chat_rejects_out_of_range_temperature():
         "/api/chat",
         json={
             "api_key": "test-key",
-            "model": "deepseek-chat",
+            "model": "deepseek-v4-flash",
             "messages": [{"role": "user", "content": "hello"}],
             "temperature": 3,
         },
@@ -105,7 +105,7 @@ def test_chat_rejects_blank_message_content():
         "/api/chat",
         json={
             "api_key": "test-key",
-            "model": "deepseek-chat",
+            "model": "deepseek-v4-flash",
             "messages": [{"role": "user", "content": "   "}],
         },
     )
@@ -120,7 +120,7 @@ def test_chat_stream_returns_text_and_usage(monkeypatch):
         "/api/chat",
         json={
             "api_key": "test-key",
-            "model": "deepseek-chat",
+            "model": "deepseek-v4-flash",
             "messages": [{"role": "user", "content": "hello"}],
             "system_prompt": "You are helpful.",
             "temperature": 0.5,

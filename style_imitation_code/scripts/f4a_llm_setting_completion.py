@@ -171,7 +171,7 @@ class SettingCompletionApp(HeadlessBaseTask):
             log_func(f"[ERROR] LLM API 调用或底层处理失败: {str(e)}")
             return False
 
-def run_headless(target_file, mode, json_data, project_name=None, model="deepseek-chat"):
+def run_headless(target_file, mode, json_data, project_name=None, model="deepseek-v4-flash"):
     import sys
     import base64
     
