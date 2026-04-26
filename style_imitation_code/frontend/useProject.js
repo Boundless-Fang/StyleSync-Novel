@@ -86,6 +86,18 @@ export function useProject() {
         return cleanName;
     };
 
+    const parseChapterNumber = (name) => {
+        const cleanName = String(name || '').replace('.txt', '');
+        const legacyMatch = cleanName.match(/^chapter_(\d+)(?:_.+)?$/i);
+        if (legacyMatch) return parseInt(legacyMatch[1], 10);
+
+        const normalizedLabel = formatChapterLabel(cleanName);
+        const arabicMatch = normalizedLabel.match(/^第(\d+)章(?:_.+)?$/);
+        if (arabicMatch) return parseInt(arabicMatch[1], 10);
+
+        return getChapterNumber(normalizedLabel);
+    };
+
     const fetchProjectCharacters = async () => { 
         if(!currentProject.value) return; 
         try { 
@@ -114,7 +126,7 @@ export function useProject() {
         const res = await fetch(`/api/projects/${currentProject.value}/chapters`); 
         let rawChapters = await res.json(); 
         
-        rawChapters.sort((a, b) => getChapterNumber(a) - getChapterNumber(b)); 
+        rawChapters.sort((a, b) => parseChapterNumber(a) - parseChapterNumber(b)); 
         chapters.value = rawChapters; 
         
         if(chapters.value.length) { 
@@ -156,8 +168,8 @@ export function useProject() {
         } 
         let maxNum = 0; 
         chapters.value.forEach(c => { 
-            let num = getChapterNumber(c); 
-            if(num !== 9999 && num !== 999 && num > maxNum) maxNum = num; 
+            let num = parseChapterNumber(c); 
+            if(num !== 999999 && num > maxNum) maxNum = num; 
         }); 
         newChapterNum.value = maxNum + 1; 
         newChapterTitle.value = ''; 
@@ -191,10 +203,12 @@ export function useProject() {
             } 
  
             if (res.ok) { 
+                const data = await res.json();
+                const canonicalName = data.chapter_name || finalName;
                 await fetchChapters(); 
-                currentChapter.value = finalName + '.txt'; 
+                currentChapter.value = canonicalName + '.txt'; 
                 showChapterModal.value = false; 
-                return finalName; 
+                return canonicalName; 
             } else { 
                 alert("创建或覆盖失败，目标文件可能被系统锁定。"); 
             } 
@@ -222,8 +236,10 @@ export function useProject() {
             } 
             
             if (res.ok) { 
+                const data = await res.json();
+                const canonicalName = data.chapter_name || newName;
                 await fetchChapters(); 
-                currentChapter.value = newName + '.txt'; 
+                currentChapter.value = canonicalName + '.txt'; 
             } else { 
                 alert("重命名失败，目标文件可能被系统锁定。"); 
             } 

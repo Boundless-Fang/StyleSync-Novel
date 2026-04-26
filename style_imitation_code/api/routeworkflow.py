@@ -612,8 +612,7 @@ async def export_f5b_prompt(req: NovelGenerationRequest):
         project_name = validate_safe_param(req.project_name)
         chapter_name = validate_safe_param(req.chapter_name)
         model = validate_safe_param(req.model)
-        script_path = _get_script_path("f5b")
-        _ensure_script_available("f5b")
+        script_config = _ensure_script_available("f5b")
 
         project_config_path = os.path.join(PROJ_DIR, project_name, "project_config.json")
         branch_mode = "同人"
@@ -627,7 +626,8 @@ async def export_f5b_prompt(req: NovelGenerationRequest):
 
         cmd = [
             sys.executable,
-            script_path,
+            "-m",
+            f"scripts.{script_config['module']}",
             "--project",
             project_name,
             "--chapter",
@@ -638,10 +638,15 @@ async def export_f5b_prompt(req: NovelGenerationRequest):
             branch_mode,
             "--export_prompt_only",
         ]
+        env = os.environ.copy()
+        existing_pythonpath = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = CODE_DIR if not existing_pythonpath else os.pathsep.join([CODE_DIR, existing_pythonpath])
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=env,
+            cwd=CODE_DIR,
         )
         stdout, stderr = await process.communicate()
         if process.returncode != 0:

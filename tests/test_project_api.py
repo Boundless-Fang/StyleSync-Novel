@@ -125,7 +125,7 @@ def test_create_project_force_overwrite_reinitializes_project(monkeypatch):
         assert response.status_code == 200
         assert response.json()["status"] == "success"
         assert not (existing_dir / "stale.txt").exists()
-        assert (existing_dir / "content" / "chapter_1.txt").exists()
+        assert (existing_dir / "content" / "第一章.txt").exists()
 
 
 def test_create_chapter_conflict_returns_409(monkeypatch):
@@ -136,12 +136,12 @@ def test_create_chapter_conflict_returns_409(monkeypatch):
         content_dir = proj_dir / "demo_project" / "content"
         content_dir.mkdir(parents=True)
         style_dir.mkdir()
-        (content_dir / "chapter_1.txt").write_text("existing", encoding="utf-8")
+        (content_dir / "第一章.txt").write_text("existing", encoding="utf-8")
 
         monkeypatch.setattr(routeproject, "PROJ_DIR", str(proj_dir))
         monkeypatch.setattr(routeproject, "STYLE_DIR", str(style_dir))
 
-        response = client.post("/api/projects/demo_project/chapters/chapter_1")
+        response = client.post("/api/projects/demo_project/chapters/第一章")
 
         assert response.status_code == 409
         assert response.json()["detail"] == "FILE_EXISTS"
@@ -155,17 +155,17 @@ def test_update_and_get_chapter_content(monkeypatch):
         content_dir = proj_dir / "demo_project" / "content"
         content_dir.mkdir(parents=True)
         style_dir.mkdir()
-        (content_dir / "chapter_1.txt").write_text("", encoding="utf-8")
+        (content_dir / "第一章.txt").write_text("", encoding="utf-8")
 
         monkeypatch.setattr(routeproject, "PROJ_DIR", str(proj_dir))
         monkeypatch.setattr(routeproject, "STYLE_DIR", str(style_dir))
 
         update_response = client.put(
-            "/api/projects/demo_project/chapters/chapter_1/content",
+            "/api/projects/demo_project/chapters/第一章/content",
             json={"content": "this is test content"},
         )
         read_response = client.get(
-            "/api/projects/demo_project/chapters/chapter_1/content"
+            "/api/projects/demo_project/chapters/第一章/content"
         )
 
         assert update_response.status_code == 200
@@ -182,20 +182,20 @@ def test_append_to_specific_chapter(monkeypatch):
         content_dir = proj_dir / "demo_project" / "content"
         content_dir.mkdir(parents=True)
         style_dir.mkdir()
-        (content_dir / "chapter_1.txt").write_text("chapter one", encoding="utf-8")
-        (content_dir / "chapter_2.txt").write_text("chapter two", encoding="utf-8")
+        (content_dir / "第一章.txt").write_text("chapter one", encoding="utf-8")
+        (content_dir / "第二章.txt").write_text("chapter two", encoding="utf-8")
 
         monkeypatch.setattr(routeproject, "PROJ_DIR", str(proj_dir))
         monkeypatch.setattr(routeproject, "STYLE_DIR", str(style_dir))
 
         response = client.post(
             "/api/projects/demo_project/append",
-            json={"content": "new text", "chapter_name": "chapter_2"},
+            json={"content": "new text", "chapter_name": "第二章"},
         )
 
         assert response.status_code == 200
-        assert (content_dir / "chapter_1.txt").read_text(encoding="utf-8") == "chapter one"
-        assert "new text" in (content_dir / "chapter_2.txt").read_text(encoding="utf-8")
+        assert (content_dir / "第一章.txt").read_text(encoding="utf-8") == "chapter one"
+        assert "new text" in (content_dir / "第二章.txt").read_text(encoding="utf-8")
 
 
 def test_append_rejects_missing_chapter(monkeypatch):
@@ -206,18 +206,54 @@ def test_append_rejects_missing_chapter(monkeypatch):
         content_dir = proj_dir / "demo_project" / "content"
         content_dir.mkdir(parents=True)
         style_dir.mkdir()
-        (content_dir / "chapter_1.txt").write_text("chapter one", encoding="utf-8")
+        (content_dir / "第一章.txt").write_text("chapter one", encoding="utf-8")
 
         monkeypatch.setattr(routeproject, "PROJ_DIR", str(proj_dir))
         monkeypatch.setattr(routeproject, "STYLE_DIR", str(style_dir))
 
         response = client.post(
             "/api/projects/demo_project/append",
-            json={"content": "new text", "chapter_name": "chapter_2"},
+            json={"content": "new text", "chapter_name": "第二章"},
         )
 
         assert response.status_code == 404
         assert response.json()["detail"] == "CHAPTER_NOT_FOUND"
+
+
+def test_chapter_migration_renames_related_outline_and_prompt_files(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        base_dir = Path(tmp_dir)
+        proj_dir = base_dir / "novel_projects"
+        style_dir = base_dir / "styles"
+        project_dir = proj_dir / "demo_project"
+        content_dir = project_dir / "content"
+        outline_dir = project_dir / "chapter_structures"
+        prompt_dir = project_dir / "chapter_specific_prompts"
+        content_dir.mkdir(parents=True)
+        outline_dir.mkdir(parents=True)
+        prompt_dir.mkdir(parents=True)
+        style_dir.mkdir()
+
+        (content_dir / "chapter_1.txt").write_text("old content", encoding="utf-8")
+        (outline_dir / "chapter_1_outline.md").write_text("outline", encoding="utf-8")
+        (prompt_dir / "prompt_chapter_1.txt").write_text("prompt", encoding="utf-8")
+        (prompt_dir / "prompt_chapter_1_f5c_prefix.txt").write_text("rewrite", encoding="utf-8")
+
+        monkeypatch.setattr(routeproject, "PROJ_DIR", str(proj_dir))
+        monkeypatch.setattr(routeproject, "STYLE_DIR", str(style_dir))
+
+        response = client.get("/api/projects/demo_project/chapters")
+
+        assert response.status_code == 200
+        assert response.json() == ["第一章.txt"]
+        assert (content_dir / "第一章.txt").exists()
+        assert not (content_dir / "chapter_1.txt").exists()
+        assert (outline_dir / "第一章_outline.md").exists()
+        assert not (outline_dir / "chapter_1_outline.md").exists()
+        assert (prompt_dir / "prompt_第一章.txt").exists()
+        assert not (prompt_dir / "prompt_chapter_1.txt").exists()
+        assert (prompt_dir / "prompt_第一章_f5c_prefix.txt").exists()
+        assert not (prompt_dir / "prompt_chapter_1_f5c_prefix.txt").exists()
 
 
 def test_project_settings_reject_path_traversal(monkeypatch):

@@ -1,1 +1,3 @@
-{}
+{
+  "tests/test_project_api.py::test_create_project_force_overwrite_reinitializes_project": true
+}

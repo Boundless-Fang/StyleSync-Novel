@@ -121,6 +121,8 @@ export function useChat(config, projectModule, workflowModule) {
     const chatInput = ref('');
     const isGenerating = ref(false);
     const isComposerFocused = ref(false);
+    const workspaceSearchQuery = ref('');
+    const activeSearchResultIndex = ref(-1);
     let abortController = null;
 
     const currentChat = computed(() => chats.value.find(c => c.id === currentChatId.value));
@@ -228,6 +230,7 @@ export function useChat(config, projectModule, workflowModule) {
             currentChat.value.stats.total_tokens = 0;
             currentChat.value.stats.local_hit_count = 0;
         }
+        activeSearchResultIndex.value = -1;
     };
 
     const resetCurrentChatDefaults = () => {
@@ -253,6 +256,70 @@ export function useChat(config, projectModule, workflowModule) {
             const input = document.getElementById('workspaceComposer');
             if (input) input.focus();
         }, 50);
+    };
+
+    const focusWorkspaceSearch = () => {
+        setTimeout(() => {
+            const input = document.getElementById('workspaceSearchInput');
+            if (input) input.focus();
+        }, 50);
+    };
+
+    const escapeHtml = (text = '') =>
+        String(text)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+
+    const escapeRegExp = (text = '') =>
+        String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+    const highlightHtmlText = (html = '', query = '') => {
+        if (!query.trim() || typeof window === 'undefined' || typeof DOMParser === 'undefined') {
+            return html;
+        }
+
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(`<div>${html}</div>`, 'text/html');
+        const root = doc.body.firstElementChild;
+        if (!root) return html;
+
+        const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+        const nodes = [];
+        let node;
+        while ((node = walker.nextNode())) {
+            nodes.push(node);
+        }
+
+        const pattern = new RegExp(escapeRegExp(query.trim()), 'gi');
+        nodes.forEach((textNode) => {
+            const text = textNode.nodeValue || '';
+            pattern.lastIndex = 0;
+            if (!pattern.test(text)) return;
+
+            const fragment = doc.createDocumentFragment();
+            let lastIndex = 0;
+            pattern.lastIndex = 0;
+            text.replace(pattern, (match, offset) => {
+                if (offset > lastIndex) {
+                    fragment.appendChild(doc.createTextNode(text.slice(lastIndex, offset)));
+                }
+                const mark = doc.createElement('mark');
+                mark.className = 'bg-yellow-200 text-inherit px-0.5 rounded';
+                mark.textContent = match;
+                fragment.appendChild(mark);
+                lastIndex = offset + match.length;
+                return match;
+            });
+            if (lastIndex < text.length) {
+                fragment.appendChild(doc.createTextNode(text.slice(lastIndex)));
+            }
+            textNode.parentNode?.replaceChild(fragment, textNode);
+        });
+
+        return root.innerHTML;
     };
 
     const stopGeneration = () => {
@@ -296,6 +363,12 @@ export function useChat(config, projectModule, workflowModule) {
         if (!currentChat.value) createNewChat();
         focusComposer();
         scrollToBottom();
+    };
+
+    const clearInjectedWorkspaceContext = () => {
+        chatInput.value = '';
+        lastInjectedLabel.value = '';
+        lastInjectedTemplate.value = '';
     };
 
     const applyQuickPrompt = (templateKey) => {
@@ -520,6 +593,112 @@ export function useChat(config, projectModule, workflowModule) {
         await streamAssistantReply(targetMessage, apiMessages);
     };
 
+    const workspaceSearchResults = computed(() => {
+        const query = workspaceSearchQuery.value.trim().toLowerCase();
+        const messages = currentChat.value?.messages || [];
+        if (!query) return [];
+
+        return messages.flatMap((message, messageIndex) => {
+            const content = message.role === 'assistant'
+                ? String(message.versions?.[message.active_version]?.content || '')
+                : String(message.content || '');
+            const lower = content.toLowerCase();
+            const indices = [];
+            let fromIndex = 0;
+            while (true) {
+                const hit = lower.indexOf(query, fromIndex);
+                if (hit === -1) break;
+                indices.push(hit);
+                fromIndex = hit + query.length;
+            }
+            return indices.map((matchIndex) => ({
+                messageIndex,
+                matchIndex,
+                role: message.role,
+            }));
+        });
+    });
+
+    const currentSearchResult = computed(() => {
+        const results = workspaceSearchResults.value;
+        if (!results.length) return null;
+        const safeIndex = Math.min(Math.max(activeSearchResultIndex.value, 0), results.length - 1);
+        return results[safeIndex];
+    });
+
+    const isSearchMatchMessage = (messageIndex) =>
+        workspaceSearchResults.value.some((item) => item.messageIndex === messageIndex);
+
+    const isActiveSearchMessage = (messageIndex) =>
+        currentSearchResult.value?.messageIndex === messageIndex;
+
+    const scrollToSearchResult = () => {
+        const target = currentSearchResult.value;
+        if (!target) return;
+        setTimeout(() => {
+            const el = document.querySelector(`[data-message-index="${target.messageIndex}"]`);
+            if (el) {
+                el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+        }, 30);
+    };
+
+    const moveSearchResult = (step = 1) => {
+        const results = workspaceSearchResults.value;
+        if (!results.length) {
+            activeSearchResultIndex.value = -1;
+            return;
+        }
+        const current = activeSearchResultIndex.value >= 0 ? activeSearchResultIndex.value : (step >= 0 ? -1 : 0);
+        activeSearchResultIndex.value = (current + step + results.length) % results.length;
+        scrollToSearchResult();
+    };
+
+    const handleWorkspaceSearchInput = () => {
+        activeSearchResultIndex.value = workspaceSearchResults.value.length ? 0 : -1;
+        scrollToSearchResult();
+    };
+
+    const handleWorkspaceSearchKeydown = (event) => {
+        if (event.key !== 'Enter') return;
+        event.preventDefault();
+        moveSearchResult(event.shiftKey ? -1 : 1);
+    };
+
+    const clearWorkspaceSearch = () => {
+        workspaceSearchQuery.value = '';
+        activeSearchResultIndex.value = -1;
+        focusWorkspaceSearch();
+    };
+
+    const copyMessageContent = async (messageIndex) => {
+        const targetMessage = currentChat.value?.messages?.[messageIndex];
+        if (!targetMessage) return;
+        const text = targetMessage.role === 'assistant'
+            ? String(targetMessage.versions?.[targetMessage.active_version]?.content || '')
+            : String(targetMessage.content || '');
+        if (!text) return;
+
+        try {
+            if (navigator?.clipboard?.writeText) {
+                await navigator.clipboard.writeText(text);
+            } else {
+                const textarea = document.createElement('textarea');
+                textarea.value = text;
+                textarea.setAttribute('readonly', 'readonly');
+                textarea.style.position = 'absolute';
+                textarea.style.left = '-9999px';
+                document.body.appendChild(textarea);
+                textarea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textarea);
+            }
+            alert('消息已复制');
+        } catch (error) {
+            alert(`复制失败: ${error.message}`);
+        }
+    };
+
     const renderMarkdown = (text) => {
         if (!text) return '';
         let parsedHtml = marked.parse(text);
@@ -527,7 +706,7 @@ export function useChat(config, projectModule, workflowModule) {
         if (forbiddenRegex.value) {
             parsedHtml = parsedHtml.replace(forbiddenRegex.value, '<span class="forbidden-highlight">$1</span>');
         }
-        return parsedHtml;
+        return highlightHtmlText(parsedHtml, workspaceSearchQuery.value);
     };
 
     Vue.watch(
@@ -573,17 +752,22 @@ export function useChat(config, projectModule, workflowModule) {
     Vue.watch(currentChatId, (value) => {
         if (typeof localStorage === 'undefined') return;
         localStorage.setItem(CHAT_CURRENT_ID_KEY, value || '');
+        activeSearchResultIndex.value = workspaceSearchResults.value.length ? 0 : -1;
     });
 
     return {
         chats, currentChatId, currentChat, chatInput, isGenerating, composerHeight,
+        workspaceSearchQuery, workspaceSearchResults, activeSearchResultIndex,
         quickPromptButtons, lastInjectedLabel, lastInjectedTemplate,
         createNewChat, copyCurrentChat, clearCurrentChatMessages, 
         sendMessage, retryAssistantMessage, stopGeneration, renderMarkdown,
+        copyMessageContent,
         toggleUserMessageCollapse, startEditUserMessage, cancelEditUserMessage, saveEditUserMessage,
         shouldCollapseUserMessage,
+        handleWorkspaceSearchInput, handleWorkspaceSearchKeydown, clearWorkspaceSearch,
+        moveSearchResult, isSearchMatchMessage, isActiveSearchMessage,
         startRenameChat, cancelRenameChat, saveRenameChat, deleteChat, formatChatCreatedAt,
         applyQuickPrompt, injectKnowledgeToWorkspace, injectEditorContentToWorkspace,
-        handleComposerFocus, handleComposerBlur, resetCurrentChatDefaults
+        clearInjectedWorkspaceContext, handleComposerFocus, handleComposerBlur, resetCurrentChatDefaults
     };
 }
