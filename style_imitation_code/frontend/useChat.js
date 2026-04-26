@@ -67,9 +67,21 @@ export function useChat(config, projectModule, workflowModule) {
         };
     };
 
+    const normalizeLegacyChatTitle = (title, index) => {
+        const safeTitle = String(title || `\u5bf9\u8bdd ${index + 1}`);
+        if (
+            safeTitle === '\u65b0\u8ba1\u7b97\u8fdb\u7a0b'
+            || safeTitle === '\u5bf9\u8bdd'
+            || safeTitle.trim() === ''
+        ) {
+            return '\u5bf9\u8bdd';
+        }
+        return safeTitle;
+    };
+
     const normalizeStoredChat = (chat, index) => {
         const id = chat?.id || `chat_${Date.now()}_${index}`;
-        const title = String(chat?.title || `对话 ${index + 1}`);
+        const title = normalizeLegacyChatTitle(chat?.title, index);
         const messages = Array.isArray(chat?.messages)
             ? chat.messages.map(normalizeStoredMessage).filter(Boolean)
             : [];
@@ -165,7 +177,7 @@ export function useChat(config, projectModule, workflowModule) {
 
     const createNewChat = () => {
         const newId = 'chat_' + Date.now();
-        chats.value.unshift(getNewChatTemplate(newId, '新计算进程'));
+        chats.value.unshift(getNewChatTemplate(newId, '对话'));
         currentChatId.value = newId;
     };
 
