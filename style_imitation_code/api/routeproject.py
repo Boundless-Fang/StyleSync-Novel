@@ -1,5 +1,6 @@
 ﻿import json
 import os
+import re
 import shutil
 from datetime import datetime
 
@@ -10,6 +11,14 @@ from .models import AppendContent, ChapterUpdate, ProjectCreate, SettingUpdate
 from core._core_utils import async_append_text, async_atomic_write, async_smart_read_text
 
 router = APIRouter()
+
+LEGACY_CHAPTER_RE = re.compile(r"^chapter_(\d+)(?:_(.+))?$", re.IGNORECASE)
+CHINESE_CHAPTER_RE = re.compile(r"^第([零一二两三四五六七八九十百千万\d]+)章(?:_(.+))?$")
+OUTLINE_FILE_RE = re.compile(r"^(?P<chapter>.+)_outline\.(?:md|json)$", re.IGNORECASE)
+PROMPT_FILE_RE = re.compile(r"^prompt_(?P<chapter>.+?)(?:_f5c_(?:prefix|fim))?\.txt$", re.IGNORECASE)
+CN_DIGIT_ORDER = ["零", "一", "二", "三", "四", "五", "六", "七", "八", "九"]
+CN_DIGITS = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+CN_UNITS = {"十": 10, "百": 100, "千": 1000, "万": 10000}
 
 FANFIC_MODES = {"同人", "fanfic"}
 ORIGINAL_MODES = {"原创", "original"}
@@ -55,6 +64,155 @@ def build_project_name(project_name: str) -> str:
     if not base_name.endswith("_style_imitation"):
         return f"{base_name}_style_imitation"
     return base_name
+
+
+def int_to_chinese(num: int) -> str:
+    if num <= 0:
+        raise ValueError("章节编号必须为正整数")
+    if num < 10:
+        return CN_DIGIT_ORDER[num]
+    if num < 20:
+        return "十" if num == 10 else f"十{CN_DIGIT_ORDER[num % 10]}"
+    if num < 100:
+        tens = num // 10
+        ones = num % 10
+        prefix = f"{CN_DIGIT_ORDER[tens]}十"
+        return prefix if ones == 0 else f"{prefix}{CN_DIGIT_ORDER[ones]}"
+    return str(num)
+
+
+def chinese_to_int(text: str) -> int | None:
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return None
+    if cleaned.isdigit():
+        return int(cleaned)
+
+    total = 0
+    current = 0
+    seen = False
+    for char in cleaned:
+        if char in CN_DIGITS:
+            current = CN_DIGITS[char]
+            seen = True
+        elif char in CN_UNITS:
+            unit = CN_UNITS[char]
+            if current == 0:
+                current = 1 if unit == 10 else 0
+            total += current * unit
+            current = 0
+            seen = True
+        else:
+            return None
+    return total + current if seen else None
+
+
+def split_chapter_name(raw_name: str) -> tuple[int, str]:
+    cleaned = str(raw_name or "").strip()
+    legacy_match = LEGACY_CHAPTER_RE.fullmatch(cleaned)
+    if legacy_match:
+        return int(legacy_match.group(1)), (legacy_match.group(2) or "").strip()
+
+    chinese_match = CHINESE_CHAPTER_RE.fullmatch(cleaned)
+    if chinese_match:
+        number = chinese_to_int(chinese_match.group(1))
+        if number is None or number <= 0:
+            raise ValueError("章节编号无效")
+        return number, (chinese_match.group(2) or "").strip()
+
+    raise ValueError("章节名只允许使用“第X章”或“第X章_标题”格式")
+
+
+def normalize_chapter_name(raw_name: str) -> str:
+    number, title = split_chapter_name(raw_name)
+    canonical = f"第{int_to_chinese(number)}章"
+    if title:
+        canonical += f"_{title}"
+    return canonical
+
+
+def chapter_sort_key_from_name(name: str) -> tuple[int, str]:
+    stem = os.path.splitext(name)[0]
+    try:
+        number, title = split_chapter_name(stem)
+        return number, title
+    except ValueError:
+        return 999999, stem
+
+
+def chapter_sort_key_from_outline(filename: str) -> tuple[int, str]:
+    match = OUTLINE_FILE_RE.fullmatch(filename)
+    chapter_name = match.group("chapter") if match else os.path.splitext(filename)[0]
+    return chapter_sort_key_from_name(chapter_name)
+
+
+def chapter_sort_key_from_prompt(filename: str) -> tuple[int, str]:
+    match = PROMPT_FILE_RE.fullmatch(filename)
+    chapter_name = match.group("chapter") if match else os.path.splitext(filename)[0]
+    return chapter_sort_key_from_name(chapter_name)
+
+
+def _rename_if_exists(src: str, dst: str) -> None:
+    if os.path.exists(src) and src != dst:
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        os.replace(src, dst)
+
+
+def migrate_project_chapter_names(base_dir: str) -> None:
+    content_dir = os.path.join(base_dir, "content")
+    if not os.path.exists(content_dir):
+        return
+
+    rename_plan = []
+    for filename in os.listdir(content_dir):
+        if not filename.endswith(".txt"):
+            continue
+        old_stem = os.path.splitext(filename)[0]
+        try:
+            new_stem = normalize_chapter_name(old_stem)
+        except ValueError:
+            continue
+        if new_stem != old_stem:
+            rename_plan.append((old_stem, new_stem))
+
+    target_paths = {}
+    for old_stem, new_stem in rename_plan:
+        if new_stem in target_paths and target_paths[new_stem] != old_stem:
+            raise RuntimeError(f"章节迁移冲突：{old_stem} 与 {target_paths[new_stem]} 都将迁移为 {new_stem}")
+        target_paths[new_stem] = old_stem
+        if os.path.exists(os.path.join(content_dir, f"{new_stem}.txt")):
+            raise RuntimeError(f"章节迁移冲突：目标章节已存在 {new_stem}")
+
+    outline_dir = os.path.join(base_dir, "chapter_structures")
+    prompt_dir = os.path.join(base_dir, "chapter_specific_prompts")
+
+    for old_stem, new_stem in sorted(rename_plan, key=lambda item: chapter_sort_key_from_name(item[0])):
+        _rename_if_exists(
+            os.path.join(content_dir, f"{old_stem}.txt"),
+            os.path.join(content_dir, f"{new_stem}.txt"),
+        )
+
+        if os.path.exists(outline_dir):
+            for suffix in ("md", "json"):
+                _rename_if_exists(
+                    os.path.join(outline_dir, f"{old_stem}_outline.{suffix}"),
+                    os.path.join(outline_dir, f"{new_stem}_outline.{suffix}"),
+                )
+
+        if os.path.exists(prompt_dir):
+            for prompt_name in os.listdir(prompt_dir):
+                if not prompt_name.startswith(f"prompt_{old_stem}"):
+                    continue
+                _rename_if_exists(
+                    os.path.join(prompt_dir, prompt_name),
+                    os.path.join(prompt_dir, prompt_name.replace(f"prompt_{old_stem}", f"prompt_{new_stem}", 1)),
+                )
+
+
+def ensure_project_chapter_naming(proj_name: str) -> str:
+    base_dir = get_real_dir(proj_name)
+    migrate_project_chapter_names(base_dir)
+    return base_dir
 
 
 def init_project_structure(target_proj_dir: str, proj: ProjectCreate) -> None:
@@ -185,10 +343,14 @@ async def create_project(proj: ProjectCreate, force_overwrite: bool = False):
 
 @router.get("/api/projects/{proj_name}/chapters")
 async def get_chapters(proj_name: str):
-    content_dir = os.path.join(PROJ_DIR, proj_name, "content")
+    base_dir = ensure_project_chapter_naming(proj_name)
+    content_dir = os.path.join(base_dir, "content")
     if not os.path.exists(content_dir):
         return []
-    return [f for f in os.listdir(content_dir) if f.endswith(".txt")]
+    return sorted(
+        [f for f in os.listdir(content_dir) if f.endswith(".txt")],
+        key=chapter_sort_key_from_name,
+    )
 
 
 @router.get("/api/projects/{proj_name}/characters")
@@ -207,11 +369,13 @@ async def create_or_rename_chapter(
     new_name: str = None,
     force_overwrite: bool = False,
 ):
-    content_dir = os.path.join(PROJ_DIR, proj_name, "content")
+    base_dir = ensure_project_chapter_naming(proj_name)
+    content_dir = os.path.join(base_dir, "content")
 
-    target_name = new_name if new_name else chap_name
+    source_name = normalize_chapter_name(chap_name)
+    target_name = normalize_chapter_name(new_name if new_name else chap_name)
     target_path = os.path.join(content_dir, f"{target_name}.txt")
-    source_path = os.path.join(content_dir, f"{chap_name}.txt")
+    source_path = os.path.join(content_dir, f"{source_name}.txt")
 
     if os.path.exists(target_path) and not force_overwrite:
         if new_name and source_path == target_path:
@@ -235,6 +399,23 @@ async def create_or_rename_chapter(
                             time.sleep(base_delay * (1.5 ** attempt) + random.uniform(0, 0.1))
                         else:
                             raise PermissionError("目标文件正被系统或其他进程占用，已超过重试上限") from exc
+                outline_dir = os.path.join(base_dir, "chapter_structures")
+                if os.path.exists(outline_dir):
+                    for suffix in ("md", "json"):
+                        _rename_if_exists(
+                            os.path.join(outline_dir, f"{source_name}_outline.{suffix}"),
+                            os.path.join(outline_dir, f"{target_name}_outline.{suffix}"),
+                        )
+
+                prompt_dir = os.path.join(base_dir, "chapter_specific_prompts")
+                if os.path.exists(prompt_dir):
+                    for prompt_name in os.listdir(prompt_dir):
+                        if not prompt_name.startswith(f"prompt_{source_name}"):
+                            continue
+                        _rename_if_exists(
+                            os.path.join(prompt_dir, prompt_name),
+                            os.path.join(prompt_dir, prompt_name.replace(f"prompt_{source_name}", f"prompt_{target_name}", 1)),
+                        )
         else:
             with open(target_path, "w", encoding="utf-8"):
                 pass
@@ -243,7 +424,11 @@ async def create_or_rename_chapter(
         import asyncio
 
         await asyncio.to_thread(_execute_chapter_fs_modification)
-        return {"status": "success"}
+        return {"status": "success", "chapter_name": target_name}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except PermissionError as exc:
         print(f"[ERROR] 章节覆盖失败: {exc}")
         raise HTTPException(status_code=500, detail="文件操作失败，目标文件正被其他进程占用") from exc
@@ -254,7 +439,7 @@ async def create_or_rename_chapter(
 
 @router.get("/api/projects/{proj_name}/chapters/{chap_name}/content")
 async def get_chapter_content(proj_name: str, chap_name: str):
-    filepath = get_validated_target_path(proj_name, f"content/{chap_name}.txt")
+    filepath = get_validated_target_path(proj_name, f"content/{normalize_chapter_name(chap_name)}.txt")
 
     if os.path.exists(filepath):
         try:
@@ -267,7 +452,7 @@ async def get_chapter_content(proj_name: str, chap_name: str):
 
 @router.put("/api/projects/{proj_name}/chapters/{chap_name}/content")
 async def update_chapter_content(proj_name: str, chap_name: str, update: ChapterUpdate):
-    filepath = get_validated_target_path(proj_name, f"content/{chap_name}.txt")
+    filepath = get_validated_target_path(proj_name, f"content/{normalize_chapter_name(chap_name)}.txt")
 
     try:
         await async_atomic_write(filepath, update.content, "text")
@@ -280,11 +465,12 @@ async def update_chapter_content(proj_name: str, chap_name: str, update: Chapter
 
 @router.post("/api/projects/{proj_name}/append")
 async def append_to_novel(proj_name: str, req: AppendContent):
-    content_dir = os.path.join(PROJ_DIR, proj_name, "content")
+    base_dir = ensure_project_chapter_naming(proj_name)
+    content_dir = os.path.join(base_dir, "content")
     if not os.path.exists(content_dir):
         raise HTTPException(status_code=404, detail="未找到章节内容目录")
 
-    target_file = get_validated_target_path(proj_name, f"content/{req.chapter_name}.txt")
+    target_file = get_validated_target_path(proj_name, f"content/{normalize_chapter_name(req.chapter_name)}.txt")
     if not os.path.exists(target_file):
         raise HTTPException(status_code=404, detail="CHAPTER_NOT_FOUND")
 
@@ -333,11 +519,14 @@ async def update_project_setting(proj_name: str, file_path: str, update: Setting
 
 @router.get("/api/projects/{proj_name}/outlines")
 async def get_outlines(proj_name: str):
-    base_dir = get_real_dir(proj_name)
+    base_dir = ensure_project_chapter_naming(proj_name)
     outline_dir = os.path.join(base_dir, "chapter_structures")
     if not os.path.exists(outline_dir):
         return []
-    return [f for f in os.listdir(outline_dir) if f.endswith(".md") or f.endswith(".json")]
+    return sorted(
+        [f for f in os.listdir(outline_dir) if f.endswith(".md") or f.endswith(".json")],
+        key=chapter_sort_key_from_outline,
+    )
 
 
 @router.get("/api/projects/{proj_name}/phase1_status")
@@ -350,8 +539,11 @@ async def check_phase1_status(proj_name: str):
 
 @router.get("/api/projects/{proj_name}/prompts")
 async def get_prompts(proj_name: str):
-    base_dir = get_real_dir(proj_name)
+    base_dir = ensure_project_chapter_naming(proj_name)
     prompt_dir = os.path.join(base_dir, "chapter_specific_prompts")
     if not os.path.exists(prompt_dir):
         return []
-    return [f for f in os.listdir(prompt_dir) if f.endswith(".txt")]
+    return sorted(
+        [f for f in os.listdir(prompt_dir) if f.endswith(".txt")],
+        key=chapter_sort_key_from_prompt,
+    )

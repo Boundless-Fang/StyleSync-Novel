@@ -288,6 +288,45 @@
             <div class="p-4 border-b border-gray-200 bg-white flex justify-between items-center shadow-sm">
                 <h2 class="font-bold text-gray-800"><i class="fa-regular fa-comments text-blue-500 mr-2"></i>{{ currentChat?.title || '未选择对话' }}</h2>
                 <div class="flex gap-2 items-center">
+                    <div class="flex items-center gap-2 bg-gray-50 border border-gray-200 rounded-xl px-2 py-1.5 shadow-sm">
+                        <i class="fa-solid fa-magnifying-glass text-gray-400 text-xs"></i>
+                        <input
+                            id="workspaceSearchInput"
+                            v-model="workspaceSearchQuery"
+                            @input="handleWorkspaceSearchInput"
+                            @keydown="handleWorkspaceSearchKeydown"
+                            type="text"
+                            placeholder="查找工作台内容"
+                            class="w-40 text-xs bg-transparent outline-none text-gray-700 placeholder:text-gray-400"
+                        >
+                        <span class="text-[11px] text-gray-400 min-w-[52px] text-right">
+                            {{ workspaceSearchResults.length ? `${Math.max(activeSearchResultIndex + 1, 1)}/${workspaceSearchResults.length}` : '0/0' }}
+                        </span>
+                        <button
+                            @click="moveSearchResult(-1)"
+                            :disabled="!workspaceSearchResults.length"
+                            class="h-6 w-6 rounded border border-gray-200 bg-white text-gray-500 hover:text-blue-600 hover:border-blue-200 disabled:opacity-40 disabled:cursor-not-allowed"
+                            title="上一个"
+                        >
+                            <i class="fa-solid fa-chevron-up text-[10px]"></i>
+                        </button>
+                        <button
+                            @click="moveSearchResult(1)"
+                            :disabled="!workspaceSearchResults.length"
+                            class="h-6 w-6 rounded border border-gray-200 bg-white text-gray-500 hover:text-blue-600 hover:border-blue-200 disabled:opacity-40 disabled:cursor-not-allowed"
+                            title="下一个"
+                        >
+                            <i class="fa-solid fa-chevron-down text-[10px]"></i>
+                        </button>
+                        <button
+                            v-if="workspaceSearchQuery"
+                            @click="clearWorkspaceSearch"
+                            class="h-6 w-6 rounded border border-gray-200 bg-white text-gray-500 hover:text-red-500 hover:border-red-200"
+                            title="清空查找"
+                        >
+                            <i class="fa-solid fa-xmark text-[10px]"></i>
+                        </button>
+                    </div>
                     <span class="text-xs text-purple-600 bg-purple-50 px-2 py-1 rounded-full border border-purple-200">消耗Token: {{ currentChat?.stats?.total_tokens || 0 }}</span>
                     <span class="text-xs text-red-500 bg-red-50 px-2 py-1 rounded-full border border-red-200">拦截次数: {{ currentChat?.stats?.local_hit_count || 0 }}</span>
                     <span class="text-xs text-gray-500 bg-gray-100 px-2 py-1 rounded-full border border-gray-200">{{ currentChat?.model }}</span>
@@ -300,15 +339,21 @@
                     <p>输入指令，执行交互式对话或文本生成...</p>
                 </div>
 
-                <div v-for="(msg, index) in currentChat?.messages" :key="index" class="flex flex-col">
+                <div v-for="(msg, index) in currentChat?.messages" :key="index" :data-message-index="index" class="flex flex-col">
                     <div v-if="msg.role === 'user'" class="self-end w-full flex flex-col items-end gap-2" style="max-width: 85%">
-                        <div class="bg-blue-600 text-white p-4 rounded-2xl rounded-tr-sm shadow-md w-full">
+                        <div :class="['bg-blue-600 text-white p-4 rounded-2xl rounded-tr-sm shadow-md w-full transition-all', isActiveSearchMessage(index) ? 'ring-2 ring-yellow-300 ring-offset-2 ring-offset-white' : (isSearchMatchMessage(index) ? 'ring-1 ring-yellow-200 ring-offset-1 ring-offset-white' : '')]">
                             <div
                                 class="leading-relaxed whitespace-pre-wrap"
                                 style="font-size: 0.95em"
                                 :style="msg.collapsed && shouldCollapseUserMessage(msg.content) ? { display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical', overflow: 'hidden' } : {}"
                             >{{ msg.content }}</div>
                             <div class="mt-3 flex items-center justify-end gap-2 text-xs">
+                                <button
+                                    @click="copyMessageContent(index)"
+                                    class="px-2 py-1 rounded border border-white/20 hover:bg-white/10 transition-colors"
+                                >
+                                    复制
+                                </button>
                                 <button
                                     @click="startEditUserMessage(index)"
                                     class="px-2 py-1 rounded border border-white/20 hover:bg-white/10 transition-colors"
@@ -347,7 +392,7 @@
                         </div>
                     </div>
                     
-                    <div v-else class="self-start w-full bg-gray-50 border border-gray-200 p-5 rounded-2xl rounded-tl-sm shadow-sm group" style="max-width: 95%">
+                    <div v-else :class="['self-start w-full bg-gray-50 border p-5 rounded-2xl rounded-tl-sm shadow-sm group transition-all', isActiveSearchMessage(index) ? 'border-yellow-300 ring-2 ring-yellow-200' : (isSearchMatchMessage(index) ? 'border-yellow-200' : 'border-gray-200')]" style="max-width: 95%">
                         <div class="markdown-body leading-relaxed text-gray-700" style="font-size: 0.95em"
                              v-html="renderMarkdown(msg.versions[msg.active_version].content)">
                         </div>
@@ -374,6 +419,9 @@
 
                             <div class="flex items-center gap-3">
                                 <span>字数: {{ msg.versions[msg.active_version].content.length }}</span>
+                                <button @click="copyMessageContent(index)" class="hover:text-blue-600 transition-colors flex items-center gap-1 bg-white px-2 py-1 rounded shadow-sm border border-gray-200">
+                                    <i class="fa-regular fa-copy"></i> 复制
+                                </button>
                                 <button @click="retryAssistantMessage(index)" :disabled="isGenerating" class="hover:text-blue-600 disabled:opacity-50 transition-colors flex items-center gap-1 bg-white px-2 py-1 rounded shadow-sm border border-gray-200">
                                     <i class="fa-solid fa-rotate-right"></i> 重试
                                 </button>
@@ -401,6 +449,12 @@
                     </button>
                 </div>
                 <div v-if="lastInjectedLabel" class="text-xs text-gray-500 flex items-center gap-2">
+                    <button
+                        @mousedown.prevent="clearInjectedWorkspaceContext"
+                        class="px-2 py-0.5 rounded border border-gray-200 bg-white text-gray-500 hover:text-red-500 hover:border-red-200 transition-colors"
+                    >
+                        退出模板
+                    </button>
                     <i class="fa-solid fa-link text-blue-500"></i>
                     <span>当前工作台上下文：{{ lastInjectedLabel }} | 模板：{{ lastInjectedTemplate }}</span>
                 </div>

@@ -169,6 +169,16 @@ export function useWorkflow(projectModule) {
     const kbSelectedFile = ref("");
     const kbContent = ref("");
 
+    const getKnowledgeLabel = (type, item) => {
+        if (type === "outlines") {
+            return item.replace(/_outline\.(md|json)$/i, "");
+        }
+        if (type === "prompts") {
+            return item.replace(/^prompt_/i, "").replace(/\.txt$/i, "");
+        }
+        return item;
+    };
+
     const normalizeCommaSeparatedInput = (value) =>
         value
             .split(/[,，、；;]/)
@@ -1156,7 +1166,7 @@ export function useWorkflow(projectModule) {
             );
             const list = await res.json();
             kbItems.value = list.map((item) => ({
-                label: item,
+                label: getKnowledgeLabel(kbType.value, item),
                 value: kbType.value === "characters" ? `${item}.md` : item,
             }));
         } catch (e) {
