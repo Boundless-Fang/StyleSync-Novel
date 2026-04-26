@@ -285,10 +285,10 @@
 
         <div class="flex flex-col h-full bg-white transition-all duration-300 z-20" 
              :style="{ width: config.showWorkspace ? config.layoutRatio + '%' : '100%', boxShadow: '0 0 15px rgba(0,0,0,0.05)' }">
-            <div class="p-4 border-b border-gray-200 bg-white flex justify-between items-center shadow-sm">
-                <h2 class="font-bold text-gray-800"><i class="fa-regular fa-comments text-blue-500 mr-2"></i>{{ currentChat?.title || '未选择对话' }}</h2>
-                <div class="flex gap-2 items-center">
-                    <div class="flex items-center gap-2 bg-gray-50 border border-gray-200 rounded-xl px-2 py-1.5 shadow-sm">
+            <div class="p-4 border-b border-gray-200 bg-white flex justify-between items-center gap-3 shadow-sm">
+                <h2 class="flex-1 min-w-0 truncate pr-2 font-bold text-gray-800"><i class="fa-regular fa-comments text-blue-500 mr-2"></i>{{ currentChat?.title || '未选择对话' }}</h2>
+                <div class="flex shrink-0 gap-2 items-center max-w-[52%]">
+                    <div class="flex items-center gap-2 bg-gray-50 border border-gray-200 rounded-xl px-2 py-1.5 shadow-sm max-w-[220px]">
                         <i class="fa-solid fa-magnifying-glass text-gray-400 text-xs"></i>
                         <input
                             id="workspaceSearchInput"
@@ -297,7 +297,7 @@
                             @keydown="handleWorkspaceSearchKeydown"
                             type="text"
                             placeholder="查找工作台内容"
-                            class="w-40 text-xs bg-transparent outline-none text-gray-700 placeholder:text-gray-400"
+                            class="w-20 lg:w-28 text-xs bg-transparent outline-none text-gray-700 placeholder:text-gray-400"
                         >
                         <span class="text-[11px] text-gray-400 min-w-[52px] text-right">
                             {{ workspaceSearchResults.length ? `${Math.max(activeSearchResultIndex + 1, 1)}/${workspaceSearchResults.length}` : '0/0' }}
@@ -830,7 +830,7 @@
                                 </div>
                                 <div>
                                     <label class="text-xs text-gray-500 block mb-1">出场角色</label>
-                                    <input v-model="workflowF5aPosition.characters" type="text" placeholder="逗号分隔，如：张小凡, 碧瑶" class="w-full text-sm border border-gray-300 rounded p-2 outline-none">
+                                    <input v-model="workflowF5aPosition.characters" type="text" placeholder="请输入角色名，用逗号分隔" class="w-full text-sm border border-gray-300 rounded p-2 outline-none">
                                 </div>
                                 <div>
                                     <label class="text-xs text-gray-500 block mb-2">本章功能（选择1-3个）</label>
@@ -1184,7 +1184,7 @@
 
                         <div v-if="autoPipelineType === 'fanfic'">
                             <label class="text-xs text-gray-500 block mb-1">核心角色名列表 (用于自动生成角色卡，逗号分隔，可留空跳过)</label>
-                            <input type="text" v-model="autoStyleCharNames" :disabled="isAutoRunning" placeholder="例如：张小凡, 碧瑶, 陆雪琪" class="w-full text-sm border border-gray-300 rounded p-2 focus:ring-1 focus:ring-blue-500 outline-none mb-2 bg-white">
+                            <input type="text" v-model="autoStyleCharNames" :disabled="isAutoRunning" placeholder="例如：角色A, 角色B, 角色C" class="w-full text-sm border border-gray-300 rounded p-2 focus:ring-1 focus:ring-blue-500 outline-none mb-2 bg-white">
                         </div>
                         
                         <div v-if="isAutoRunning" class="mt-2 p-2 bg-white rounded border border-blue-100 flex items-center gap-2 text-sm text-blue-700 font-bold shadow-inner">
