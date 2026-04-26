@@ -10,6 +10,24 @@ from core._core_utils import smart_read_text, atomic_write
 from core._core_llm import call_deepseek_api
 from core._core_rag import RAGRetriever
 
+CHARACTER_SECTION_CONTRACT = """
+
+【角色栏目输出协议】
+你的输出必须包含一个独立的二级标题，标题必须严格写成：
+## 出场角色以及别名
+
+这一栏必须放在最终 Markdown 中，并满足以下要求：
+1. 标题必须完全一致，不要改写成别的说法。
+2. 标题下方使用无序列表，每行一个角色。
+3. 格式统一为：
+- 角色名（别名1，别名2）
+如果没有别名，则写成：
+- 角色名
+4. 只写明确可识别为角色的人名、昵称、亲属称呼或身份称呼，不要把普通高频词、动作词、代词、环境词放进去。
+5. 不要在这一栏里写解释句、分析句、补充说明，只输出角色条目本身。
+6. 如果原文中存在亲属称呼、身份称呼、昵称，且能稳定对应到同一角色，可以作为别名写入括号。
+"""
+
 class WorldviewApp(HeadlessBaseTask):
     def __init__(self):
         super().__init__()
@@ -94,7 +112,7 @@ class WorldviewApp(HeadlessBaseTask):
 
 【专属词库参考】：
 """
-            prompt = prompt_header + vocab_text + "\n\n【文本高相关度片段 (经 RAG 检索提取)】：\n" + context_text
+            prompt = prompt_header + CHARACTER_SECTION_CONTRACT + "\n\n" + vocab_text + "\n\n【文本高相关度片段 (经 RAG 检索提取)】：\n" + context_text
             sys_prompt = "你是一个严谨的设定整理专家。只允许输出 Markdown 格式的纯文本，禁止输出多余的寒暄语。"
 
             try:

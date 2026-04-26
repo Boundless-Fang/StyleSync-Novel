@@ -1,21 +1,15 @@
 # StyleSync-Novel
 
-面向小说创作场景的 AI 原型项目。  
-它不是“一键出文”工具，而是把创作过程拆成若干可控环节，用来验证长篇创作里的风格控制、设定整理、章节规划、正文生成和局部修改。
+StyleSync-Novel 是一个面向小说创作场景的 AI 原型项目。它不是“一键出文”工具，而是把创作过程拆成若干可控环节，用来验证长篇创作中的风格控制、设定整理、章节规划、正文生成和局部修改。
 
-## 使用前先准备
+## 使用前需要准备
 
-启动前只需要先确认 3 件事：
+启动前请先确认：
 
-1. Python 3.11 或 3.12
-2. `DEEPSEEK_API_KEY`
-3. `SILICONFLOW_API_KEY`
-
-说明：
-
-- `DEEPSEEK_API_KEY`：用于聊天、设定补全、大纲生成、正文生成、工作台微调等主流程
-- `SILICONFLOW_API_KEY`：用于 embedding / RAG / 检索相关流程；想完整跑通风格分析和知识库能力时需要
-- 前端直接加载在线静态资源，建议在中国大陆常见网络环境下使用；如果页面样式、图标或脚本加载不完整，先检查网络
+1. 已安装 Python 3.11 或 3.12
+2. 已准备 `DEEPSEEK_API_KEY`
+3. 如需使用 embedding / RAG / 检索相关流程，已准备 `SILICONFLOW_API_KEY`
+4. 建议在常见中国大陆网络环境下使用；如果页面样式、图标或脚本加载不完整，请先检查网络连接
 
 `.env.example` 示例：
 
@@ -36,17 +30,9 @@ DEFAULT_EMBEDDING_MODEL=BAAI/bge-m3
 - 章节大纲生成
 - 正文生成
 - 章内局部修改
-- 工作台内的提示词注入、复制、查找与微调
+- 工作台内的提示词注入与微调
 
-## 项目定位
-
-这是一个用于展示和验证 AI 小说创作产品链路的 MVP，重点不是部署上线，而是：
-
-- 验证“先分析、再规划、再生成、再修改”的工作流是否成立
-- 验证风格分析、设定整理、章节生成、局部改写能否串成闭环
-- 作为 GitHub 作品，用于演示产品思路、原型能力和后续迭代方向
-
-## 主要流程
+## 项目流程
 
 1. 项目初始化与素材准备
 2. 风格分析与词汇整理
@@ -62,17 +48,17 @@ DEFAULT_EMBEDDING_MODEL=BAAI/bge-m3
 ```text
 StyleSync-Novel/
 ├─ style_imitation_code/
-│  ├─ api/                  # FastAPI 路由与任务接口
-│  ├─ core/                 # LLM、RAG、配置与通用能力
-│  ├─ frontend/             # 前端工作台
-│  ├─ scripts/              # 各阶段脚本
-│  └─ main.py               # 启动入口
-├─ docs/                    # 设计与评估文档
-├─ tests/                   # 接口与流程测试
-├─ dictionaries/            # 词典与词汇库
-├─ reference_novels/        # 参考文本
-├─ text_style_imitation/    # 风格分析相关数据
-├─ novel_projects/          # 项目运行产物
+│  ├─ api/
+│  ├─ core/
+│  ├─ frontend/
+│  ├─ scripts/
+│  └─ main.py
+├─ docs/
+├─ tests/
+├─ dictionaries/
+├─ reference_novels/
+├─ text_style_imitation/
+├─ novel_projects/
 ├─ requirements.txt
 └─ README.md
 ```
@@ -93,7 +79,7 @@ python -m pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
 
-然后把你的 API Key 填进去。
+然后填写所需的 API Key。
 
 ### 3. 启动项目
 
@@ -104,16 +90,6 @@ python style_imitation_code/main.py
 默认访问：
 
 - <http://127.0.0.1:8000>
-
-## 推荐演示重点
-
-如果你要录视频或做作品展示，优先演示：
-
-- `f5a`：章节大纲生成
-- `f5b`：正文生成
-- `f5c`：章内局部修改
-
-这三步最能体现“先规划、再生成、再修改”的产品链路。
 
 ## 测试
 
